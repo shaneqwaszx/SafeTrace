@@ -33,6 +33,7 @@ COPY src/        /app/src/
 COPY frontend/   /app/frontend/
 COPY main.py     /app/main.py
 COPY docker/entrypoint.sh /app/docker/entrypoint.sh
+RUN sed -i 's/\r$//' /app/docker/entrypoint.sh
 RUN chmod +x /app/docker/entrypoint.sh
 
 # Checkpoints + data are mounted at runtime (`-v`) so the image stays slim.

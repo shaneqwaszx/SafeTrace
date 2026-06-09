@@ -1,0 +1,2259 @@
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: **/venv/**, **/__pycache__/**, **/*.mp4
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.dockerignore
+.gitignore
+checkpoints/.gitkeep
+docker-compose.yml
+docker/Dockerfile
+docker/Dockerfile.blackwell
+docker/entrypoint.sh
+docker/requirements.txt
+frontend/app.py
+frontend/components/__init__.py
+main.py
+README.md
+src/__init__.py
+src/clip_embedder.py
+src/config.py
+src/faiss_index.py
+src/mobile_sam_segmenter.py
+src/pipeline.py
+src/rule_engine.py
+src/schemas.py
+src/utils.py
+src/vlm_reasoner.py
+src/yolo_detector.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".dockerignore">
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+data/frames/*
+data/annotated/*
+data/embeddings.npy
+data/metadata.json
+data/index.faiss
+checkpoints/*
+!checkpoints/.gitkeep
+.vscode/
+.idea/
+*.md
+!README.md
+</file>
+
+<file path=".gitignore">
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Data / models / outputs
+data/frames/*
+data/annotated/*
+data/embeddings.npy
+data/metadata.json
+data/index.faiss
+checkpoints/*
+!checkpoints/.gitkeep
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+</file>
+
+<file path="checkpoints/.gitkeep">
+
+</file>
+
+<file path="docker/Dockerfile">
+# SafeTrace — GPU-enabled, offline-ready container
+FROM pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    SAFETRACE_OFFLINE=1 \
+    STREAMLIT_SERVER_HEADLESS=true \
+    STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
+    STREAMLIT_SERVER_PORT=8501
+
+# System libs needed by OpenCV / video decoding.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libgl1 \
+        libglib2.0-0 \
+        git \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python deps first to maximize layer cache reuse.
+COPY docker/requirements.txt /app/docker/requirements.txt
+RUN pip install --upgrade pip \
+ && pip install -r /app/docker/requirements.txt
+
+# Project source
+COPY src/        /app/src/
+COPY frontend/   /app/frontend/
+COPY main.py     /app/main.py
+COPY docker/entrypoint.sh /app/docker/entrypoint.sh
+RUN chmod +x /app/docker/entrypoint.sh
+
+# Checkpoints + data are mounted at runtime (`-v`) so the image stays slim.
+RUN mkdir -p /app/checkpoints /app/data/frames
+
+EXPOSE 8501
+
+ENTRYPOINT ["/app/docker/entrypoint.sh"]
+CMD ["ui"]
+</file>
+
+<file path="docker/Dockerfile.blackwell">
+# SafeTrace — Blackwell-capable (RTX 50-series, sm_120) GPU image.
+# Use this Dockerfile if the default one gives:
+#   "CUDA error: no kernel image is available for execution on the device"
+#
+# Build:
+#   docker build -f docker/Dockerfile.blackwell -t safetrace:blackwell .
+# Run (compose):
+#   set SAFETRACE_DEVICE=cuda and `image: safetrace:blackwell` in docker-compose.yml.
+
+FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    SAFETRACE_OFFLINE=1 \
+    STREAMLIT_SERVER_HEADLESS=true \
+    STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
+    STREAMLIT_SERVER_PORT=8501
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.10 python3-pip python3.10-venv \
+        ffmpeg libgl1 libglib2.0-0 git curl \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# PyTorch with sm_120 (Blackwell) kernels — cu128 wheels.
+RUN pip install --upgrade pip \
+ && pip install --index-url https://download.pytorch.org/whl/cu128 \
+        torch==2.7.0 torchvision==0.22.0
+
+# Project deps (faiss-gpu-cu12 instead of faiss-cpu since we have a working CUDA).
+COPY docker/requirements.txt /app/docker/requirements.txt
+RUN sed -i 's/^faiss-cpu.*/faiss-gpu-cu12==1.9.0/' /app/docker/requirements.txt \
+ && pip install -r /app/docker/requirements.txt
+
+COPY src/        /app/src/
+COPY frontend/   /app/frontend/
+COPY main.py     /app/main.py
+COPY docker/entrypoint.sh /app/docker/entrypoint.sh
+RUN chmod +x /app/docker/entrypoint.sh
+
+RUN mkdir -p /app/checkpoints /app/data/frames
+
+EXPOSE 8501
+ENTRYPOINT ["/app/docker/entrypoint.sh"]
+CMD ["ui"]
+</file>
+
+<file path="frontend/components/__init__.py">
+# Streamlit components placeholder. Custom components can be added here.
+</file>
+
+<file path="main.py">
+"""SafeTrace command-line entry point.
+
+Usage examples
+--------------
+    # Build the FAISS index from a folder of media:
+    python main.py ingest path/to/video.mp4 path/to/img1.jpg
+
+    # Run a query over the existing index:
+    python main.py query "worker without helmet" --k 5
+
+    # Launch the Streamlit UI (equivalent to `streamlit run frontend/app.py`):
+    python main.py ui
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import subprocess
+import sys
+from pathlib import Path
+
+from src.config import SETTINGS
+from src.pipeline import SafeTracePipeline
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
+)
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    pipe = SafeTracePipeline()
+    frames = pipe.ingest(args.inputs, fps=args.fps)
+    print(f"Indexed {len(frames)} frames into {SETTINGS.index_path}")
+    return 0
+
+
+def cmd_query(args: argparse.Namespace) -> int:
+    pipe = SafeTracePipeline()
+    results = pipe.analyze_query(args.query, k=args.k)
+    out = json.dumps(results, indent=2)
+    if args.output:
+        Path(args.output).write_text(out, encoding="utf-8")
+        print(f"Wrote {args.output}")
+    else:
+        print(out)
+    return 0
+
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    app = Path(__file__).parent / "frontend" / "app.py"
+    cmd = [
+        sys.executable, "-m", "streamlit", "run", str(app),
+        "--server.port", str(args.port),
+        "--server.address", args.host,
+        "--server.headless", "true",
+    ]
+    return subprocess.call(cmd)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="safetrace")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    pi = sub.add_parser("ingest", help="Extract frames + build FAISS index")
+    pi.add_argument("inputs", nargs="+", help="Video/image files")
+    pi.add_argument("--fps", type=float, default=SETTINGS.frame_fps)
+    pi.set_defaults(func=cmd_ingest)
+
+    pq = sub.add_parser("query", help="Run analyze_query on the existing index")
+    pq.add_argument("query")
+    pq.add_argument("--k", type=int, default=SETTINGS.top_k)
+    pq.add_argument("--output", "-o")
+    pq.set_defaults(func=cmd_query)
+
+    pu = sub.add_parser("ui", help="Launch the Streamlit UI")
+    pu.add_argument("--host", default="0.0.0.0")
+    pu.add_argument("--port", type=int, default=8501)
+    pu.set_defaults(func=cmd_ui)
+
+    return p
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+</file>
+
+<file path="src/__init__.py">
+"""SafeTrace: Offline Safety Violation Detection System."""
+__version__ = "0.1.0"
+</file>
+
+<file path="src/clip_embedder.py">
+"""SigLIP / CLIP image+text embedder.
+
+Loads a local HuggingFace model directory (offline) and produces L2-normalized
+embeddings suitable for cosine-similarity search via FAISS ``IndexFlatIP``.
+"""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Iterable, List, Sequence
+
+import numpy as np
+import torch
+from PIL import Image
+
+from .config import SETTINGS
+from .utils import imread_rgb, resolve_device, write_json
+
+logger = logging.getLogger("safetrace.embedder")
+
+
+def _l2_normalize(x: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(x, axis=-1, keepdims=True)
+    return x / np.clip(norm, 1e-12, None)
+
+
+class ClipEmbedder:
+    """Wraps a local SigLIP (default) or CLIP model.
+
+    The class auto-detects which HuggingFace AutoClass to use based on the
+    config files present in the local model directory.
+    """
+
+    def __init__(
+        self,
+        model_dir: str | Path | None = None,
+        device: str | None = None,
+        batch_size: int | None = None,
+    ) -> None:
+        self.model_dir = Path(model_dir or SETTINGS.siglip_model_dir)
+        self.device = resolve_device(device or SETTINGS.device)
+        self.batch_size = batch_size or SETTINGS.embedding_batch_size
+
+        if not self.model_dir.exists():
+            raise FileNotFoundError(
+                f"Embedding model directory not found: {self.model_dir}. "
+                "Place a local SigLIP/CLIP model snapshot there for offline use."
+            )
+
+        from transformers import AutoModel, AutoProcessor
+
+        logger.info("Loading embedding model from %s on %s", self.model_dir, self.device)
+        self.processor = AutoProcessor.from_pretrained(str(self.model_dir), local_files_only=True)
+        self.model = AutoModel.from_pretrained(str(self.model_dir), local_files_only=True)
+        self.model.to(self.device).eval()
+
+    # ------------------------------------------------------------------ #
+    # Image embeddings
+    # ------------------------------------------------------------------ #
+    @torch.inference_mode()
+    def embed_images(self, images: Sequence[np.ndarray | str | Path]) -> np.ndarray:
+        if not images:
+            return np.zeros((0, self._dim()), dtype=np.float32)
+
+        out: List[np.ndarray] = []
+        for start in range(0, len(images), self.batch_size):
+            batch = images[start : start + self.batch_size]
+            pil_batch = [self._to_pil(x) for x in batch]
+            inputs = self.processor(images=pil_batch, return_tensors="pt")
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            feats = self.model.get_image_features(**inputs)
+            out.append(feats.detach().cpu().float().numpy())
+        arr = np.concatenate(out, axis=0)
+        return _l2_normalize(arr).astype(np.float32)
+
+    @torch.inference_mode()
+    def embed_text(self, texts: str | Iterable[str]) -> np.ndarray:
+        if isinstance(texts, str):
+            texts = [texts]
+        texts = list(texts)
+        if not texts:
+            return np.zeros((0, self._dim()), dtype=np.float32)
+
+        # SigLIP processors expect padding="max_length"; CLIP works with True.
+        try:
+            inputs = self.processor(
+                text=texts, return_tensors="pt", padding="max_length", truncation=True
+            )
+        except Exception:
+            inputs = self.processor(
+                text=texts, return_tensors="pt", padding=True, truncation=True
+            )
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        feats = self.model.get_text_features(**inputs)
+        arr = feats.detach().cpu().float().numpy()
+        return _l2_normalize(arr).astype(np.float32)
+
+    # ------------------------------------------------------------------ #
+    # Persistence helpers
+    # ------------------------------------------------------------------ #
+    def build_corpus(
+        self,
+        frame_paths: Sequence[Path],
+        embeddings_path: Path | None = None,
+        metadata_path: Path | None = None,
+    ) -> tuple[np.ndarray, list[dict]]:
+        """Embed every frame, persist embeddings + metadata to disk, return both."""
+        embeddings_path = Path(embeddings_path or SETTINGS.embeddings_path)
+        metadata_path = Path(metadata_path or SETTINGS.metadata_path)
+
+        logger.info("Embedding %d frames", len(frame_paths))
+        embeddings = self.embed_images([str(p) for p in frame_paths])
+
+        metadata = [
+            {"frame_id": Path(p).stem, "frame_path": str(p), "index": i}
+            for i, p in enumerate(frame_paths)
+        ]
+
+        embeddings_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(embeddings_path, embeddings)
+        write_json(metadata_path, metadata)
+        logger.info("Wrote %s and %s", embeddings_path, metadata_path)
+        return embeddings, metadata
+
+    # ------------------------------------------------------------------ #
+    # Internal helpers
+    # ------------------------------------------------------------------ #
+    def _dim(self) -> int:
+        cfg = getattr(self.model, "config", None)
+        return int(getattr(cfg, "projection_dim", 512) or 512)
+
+    @staticmethod
+    def _to_pil(x) -> Image.Image:
+        if isinstance(x, Image.Image):
+            return x.convert("RGB")
+        if isinstance(x, (str, Path)):
+            return Image.fromarray(imread_rgb(x))
+        if isinstance(x, np.ndarray):
+            return Image.fromarray(x)
+        raise TypeError(f"Unsupported image type: {type(x)}")
+</file>
+
+<file path="src/config.py">
+"""Central configuration for SafeTrace.
+
+All paths, thresholds, and toggles live here. Values can be overridden via
+environment variables to keep the system fully offline-configurable.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict
+
+
+def _env(key: str, default: str) -> str:
+    return os.environ.get(key, default)
+
+
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.environ.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(os.environ.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    raw = os.environ.get(key)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+@dataclass
+class Settings:
+    # ---- Paths ----
+    project_root: Path = PROJECT_ROOT
+    data_dir: Path = PROJECT_ROOT / "data"
+    frames_dir: Path = PROJECT_ROOT / "data" / "frames"
+    embeddings_path: Path = PROJECT_ROOT / "data" / "embeddings.npy"
+    metadata_path: Path = PROJECT_ROOT / "data" / "metadata.json"
+    index_path: Path = PROJECT_ROOT / "data" / "index.faiss"
+    checkpoints_dir: Path = PROJECT_ROOT / "checkpoints"
+
+    # ---- Models (local checkpoints / local model dirs) ----
+    siglip_model_dir: Path = field(
+        default_factory=lambda: Path(
+            _env("SAFETRACE_SIGLIP_DIR", str(PROJECT_ROOT / "checkpoints" / "siglip-base-patch16-224"))
+        )
+    )
+    yolo_checkpoint: Path = field(
+        default_factory=lambda: Path(
+            _env("SAFETRACE_YOLO_CKPT", str(PROJECT_ROOT / "checkpoints" / "yolov9c-seg.pt"))
+        )
+    )
+    yolo_fallback_checkpoint: Path = field(
+        default_factory=lambda: Path(
+            _env("SAFETRACE_YOLO_FALLBACK_CKPT", str(PROJECT_ROOT / "checkpoints" / "yolov8s-seg.pt"))
+        )
+    )
+    mobile_sam_checkpoint: Path = field(
+        default_factory=lambda: Path(
+            _env("SAFETRACE_MSAM_CKPT", str(PROJECT_ROOT / "checkpoints" / "mobile_sam.pt"))
+        )
+    )
+    vlm_model_dir: Path = field(
+        default_factory=lambda: Path(
+            _env("SAFETRACE_VLM_DIR", str(PROJECT_ROOT / "checkpoints" / "vlm_model"))
+        )
+    )
+
+    # ---- Runtime ----
+    device: str = field(default_factory=lambda: _env("SAFETRACE_DEVICE", "auto"))
+    offline: bool = field(default_factory=lambda: _env_bool("SAFETRACE_OFFLINE", True))
+    enable_vlm: bool = field(default_factory=lambda: _env_bool("SAFETRACE_ENABLE_VLM", False))
+
+    # ---- Sampling / pipeline ----
+    frame_fps: float = field(default_factory=lambda: _env_float("SAFETRACE_FPS", 1.0))
+    max_frames: int = field(default_factory=lambda: _env_int("SAFETRACE_MAX_FRAMES", 600))
+    top_k: int = field(default_factory=lambda: _env_int("SAFETRACE_TOPK", 5))
+    embedding_batch_size: int = field(default_factory=lambda: _env_int("SAFETRACE_EMB_BATCH", 16))
+
+    # ---- Detection ----
+    yolo_conf_threshold: float = field(default_factory=lambda: _env_float("SAFETRACE_YOLO_CONF", 0.25))
+    yolo_iou_threshold: float = field(default_factory=lambda: _env_float("SAFETRACE_YOLO_IOU", 0.45))
+
+    # ---- Rule thresholds ----
+    helmet_iou_threshold: float = 0.20      # IoU(head, helmet) below => missing
+    hands_wheel_iou_threshold: float = 0.10  # IoU(hand, wheel) below => off-wheel
+    phone_hand_iou_threshold: float = 0.30   # IoU(phone, hand) above => phone use
+    seatbelt_iou_threshold: float = 0.20     # IoU(seatbelt, torso) below => missing
+
+    def ensure_dirs(self) -> None:
+        for p in (self.data_dir, self.frames_dir, self.checkpoints_dir):
+            p.mkdir(parents=True, exist_ok=True)
+
+    def apply_offline_env(self) -> None:
+        """Force HuggingFace / transformers into offline mode."""
+        if self.offline:
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+
+# Class label vocabulary used by the rule engine. Different YOLO checkpoints
+# may use different label spellings, so each rule key maps to many possible
+# raw class names that we treat as equivalent.
+CLASS_ALIASES: Dict[str, set[str]] = {
+    "person": {"person"},
+    "head": {"head", "face"},
+    "helmet": {"helmet", "hard hat", "hardhat", "safety helmet"},
+    "hand": {"hand", "hands"},
+    "steering_wheel": {"steering wheel", "steering_wheel", "wheel"},
+    "phone": {"phone", "cell phone", "cellphone", "mobile phone", "smartphone"},
+    "seatbelt": {"seatbelt", "seat belt", "seat_belt", "belt"},
+    "torso": {"torso", "upper body", "chest"},
+}
+
+
+def normalize_label(raw: str) -> str | None:
+    """Map a raw model label to a canonical SafeTrace label, or None."""
+    if not raw:
+        return None
+    needle = raw.strip().lower()
+    for canonical, aliases in CLASS_ALIASES.items():
+        if needle in aliases:
+            return canonical
+    return None
+
+
+SETTINGS = Settings()
+SETTINGS.ensure_dirs()
+SETTINGS.apply_offline_env()
+</file>
+
+<file path="src/faiss_index.py">
+"""FAISS vector store for SafeTrace.
+
+Uses ``IndexFlatIP`` with L2-normalized vectors for cosine similarity.
+Embeddings, metadata, and the index file all live under ``data/`` for
+fully offline reuse.
+"""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import List, Optional, Sequence
+
+import faiss
+import numpy as np
+
+from .clip_embedder import ClipEmbedder
+from .config import SETTINGS
+from .utils import read_json, write_json
+
+logger = logging.getLogger("safetrace.faiss")
+
+
+class FaissIndex:
+    def __init__(
+        self,
+        embedder: Optional[ClipEmbedder] = None,
+        index_path: Path | None = None,
+        metadata_path: Path | None = None,
+        embeddings_path: Path | None = None,
+    ) -> None:
+        self.index_path = Path(index_path or SETTINGS.index_path)
+        self.metadata_path = Path(metadata_path or SETTINGS.metadata_path)
+        self.embeddings_path = Path(embeddings_path or SETTINGS.embeddings_path)
+        self._embedder = embedder
+        self.index: Optional[faiss.Index] = None
+        self.metadata: List[dict] = []
+
+    # ------------------------------------------------------------------ #
+    # Build / load / save
+    # ------------------------------------------------------------------ #
+    def build(self, embeddings: np.ndarray, metadata: Sequence[dict]) -> None:
+        if embeddings.ndim != 2 or embeddings.size == 0:
+            raise ValueError("Embeddings must be a non-empty 2-D array.")
+        dim = embeddings.shape[1]
+        index = faiss.IndexFlatIP(dim)
+        index.add(embeddings.astype(np.float32))
+        self.index = index
+        self.metadata = list(metadata)
+        logger.info("Built FAISS IndexFlatIP with %d vectors (dim=%d)", index.ntotal, dim)
+
+    def save(self) -> None:
+        if self.index is None:
+            raise RuntimeError("Cannot save: no index in memory.")
+        self.index_path.parent.mkdir(parents=True, exist_ok=True)
+        faiss.write_index(self.index, str(self.index_path))
+        write_json(self.metadata_path, self.metadata)
+        logger.info("Saved FAISS index → %s", self.index_path)
+
+    def load(self) -> None:
+        if not self.index_path.exists():
+            raise FileNotFoundError(f"FAISS index not found: {self.index_path}")
+        if not self.metadata_path.exists():
+            raise FileNotFoundError(f"Metadata not found: {self.metadata_path}")
+        self.index = faiss.read_index(str(self.index_path))
+        self.metadata = read_json(self.metadata_path)
+        logger.info("Loaded FAISS index with %d vectors", self.index.ntotal)
+
+    def build_from_frames(self, frame_paths: Sequence[Path]) -> None:
+        if self._embedder is None:
+            self._embedder = ClipEmbedder()
+        embs, meta = self._embedder.build_corpus(frame_paths)
+        self.build(embs, meta)
+        self.save()
+
+    # ------------------------------------------------------------------ #
+    # Search
+    # ------------------------------------------------------------------ #
+    def semantic_search(self, query: str, k: int = 5) -> List[dict]:
+        """Encode a text query and return top-k metadata records with scores."""
+        if self.index is None:
+            self.load()
+        if self._embedder is None:
+            self._embedder = ClipEmbedder()
+        if not self.metadata:
+            return []
+
+        q = self._embedder.embed_text(query)
+        k = max(1, min(k, self.index.ntotal))
+        scores, idxs = self.index.search(q.astype(np.float32), k)
+        results: List[dict] = []
+        for score, idx in zip(scores[0], idxs[0]):
+            if idx < 0 or idx >= len(self.metadata):
+                continue
+            entry = dict(self.metadata[idx])
+            entry["score"] = float(score)
+            results.append(entry)
+        return results
+</file>
+
+<file path="src/mobile_sam_segmenter.py">
+"""MobileSAM mask refinement.
+
+For each YOLO detection box, runs MobileSAM (vit_t) to obtain a tight binary
+mask projected back to the original frame coordinates. Falls back gracefully
+to the coarse YOLO mask if MobileSAM is unavailable.
+"""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import List, Optional
+
+import numpy as np
+
+from .config import SETTINGS
+from .schemas import Detection
+from .utils import imread_rgb, resolve_device
+
+logger = logging.getLogger("safetrace.msam")
+
+
+class MobileSamSegmenter:
+    def __init__(
+        self,
+        checkpoint: str | Path | None = None,
+        device: str | None = None,
+        model_type: str = "vit_t",
+    ) -> None:
+        self.device = resolve_device(device or SETTINGS.device)
+        self.checkpoint = Path(checkpoint or SETTINGS.mobile_sam_checkpoint)
+        self._predictor = None
+        self._available = False
+
+        if not self.checkpoint.exists():
+            logger.warning(
+                "MobileSAM checkpoint missing at %s; refinement disabled.",
+                self.checkpoint,
+            )
+            return
+        try:
+            from mobile_sam import SamPredictor, sam_model_registry  # type: ignore
+
+            sam = sam_model_registry[model_type](checkpoint=str(self.checkpoint))
+            sam.to(device=self.device)
+            sam.eval()
+            self._predictor = SamPredictor(sam)
+            self._available = True
+            logger.info("MobileSAM loaded from %s on %s", self.checkpoint, self.device)
+        except Exception as exc:  # pragma: no cover - depends on optional dep
+            logger.warning("MobileSAM unavailable (%s); using YOLO masks only.", exc)
+
+    # ------------------------------------------------------------------ #
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def refine(self, image, detections: List[Detection]) -> List[Detection]:
+        """Populate ``detection.refined_mask`` for each detection in-place."""
+        if not detections:
+            return detections
+        if not self._available:
+            for d in detections:
+                if d.refined_mask is None and d.coarse_mask is not None:
+                    d.refined_mask = d.coarse_mask
+            return detections
+
+        if isinstance(image, (str, Path)):
+            img = imread_rgb(image)
+        else:
+            img = image
+
+        try:
+            self._predictor.set_image(img)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("MobileSAM set_image failed (%s); falling back.", exc)
+            for d in detections:
+                if d.refined_mask is None and d.coarse_mask is not None:
+                    d.refined_mask = d.coarse_mask
+            return detections
+
+        h, w = img.shape[:2]
+        for det in detections:
+            box = np.array(det.bbox, dtype=np.float32)
+            try:
+                masks, scores, _ = self._predictor.predict(
+                    box=box,
+                    multimask_output=False,
+                )
+                if masks is not None and len(masks) > 0:
+                    mask = masks[0].astype(bool)
+                    if mask.shape != (h, w):
+                        # Should already match input, but guard just in case.
+                        import cv2
+                        mask = cv2.resize(mask.astype(np.uint8), (w, h),
+                                          interpolation=cv2.INTER_NEAREST).astype(bool)
+                    det.refined_mask = mask
+                else:
+                    det.refined_mask = det.coarse_mask
+            except Exception as exc:  # pragma: no cover
+                logger.warning("MobileSAM refine failed for %s: %s", det.label, exc)
+                det.refined_mask = det.coarse_mask
+        return detections
+</file>
+
+<file path="src/pipeline.py">
+"""End-to-end SafeTrace pipeline.
+
+Public entry points:
+- :class:`SafeTracePipeline.ingest` — extract frames from videos / pass-through
+  images, embed them, and (re)build the FAISS index.
+- :func:`SafeTracePipeline.analyze_query` — semantic search → YOLO detection →
+  MobileSAM refinement → rule evaluation → optional VLM explanation, returning
+  a structured JSON-friendly list.
+"""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional
+
+from .clip_embedder import ClipEmbedder
+from .config import SETTINGS
+from .faiss_index import FaissIndex
+from .mobile_sam_segmenter import MobileSamSegmenter
+from .rule_engine import evaluate as evaluate_rules
+from .schemas import FrameAnalysis
+from .utils import (
+    collect_inputs,
+    draw_overlays,
+    extract_frames,
+    imread_rgb,
+    imwrite_rgb,
+    is_video,
+)
+from .vlm_reasoner import VlmReasoner
+from .yolo_detector import YoloDetector
+
+logger = logging.getLogger("safetrace.pipeline")
+
+
+class SafeTracePipeline:
+    def __init__(
+        self,
+        embedder: Optional[ClipEmbedder] = None,
+        index: Optional[FaissIndex] = None,
+        detector: Optional[YoloDetector] = None,
+        segmenter: Optional[MobileSamSegmenter] = None,
+        vlm: Optional[VlmReasoner] = None,
+    ) -> None:
+        self.embedder = embedder or ClipEmbedder()
+        self.index = index or FaissIndex(embedder=self.embedder)
+        self.detector = detector or YoloDetector()
+        self.segmenter = segmenter or MobileSamSegmenter()
+        self.vlm = vlm or VlmReasoner()
+
+    # ------------------------------------------------------------------ #
+    # Ingestion
+    # ------------------------------------------------------------------ #
+    def ingest(
+        self,
+        inputs: Iterable[str | Path],
+        fps: float | None = None,
+        max_frames: int | None = None,
+    ) -> List[Path]:
+        """Convert videos to frames, accept images as-is, then build the FAISS index."""
+        fps = fps or SETTINGS.frame_fps
+        max_frames = max_frames or SETTINGS.max_frames
+
+        videos, images = collect_inputs(inputs)
+        all_frames: List[Path] = []
+
+        for vid in videos:
+            frames = extract_frames(vid, SETTINGS.frames_dir, fps=fps, max_frames=max_frames)
+            all_frames.extend(frames)
+
+        # Copy/standardize image inputs into the frames folder so the corpus
+        # has one canonical location.
+        for img in images:
+            dst = SETTINGS.frames_dir / img.name
+            if str(dst.resolve()) != str(img.resolve()):
+                arr = imread_rgb(img)
+                imwrite_rgb(dst, arr)
+            all_frames.append(dst)
+
+        if not all_frames:
+            raise ValueError("No usable frames produced from the supplied inputs.")
+
+        self.index.build_from_frames(all_frames)
+        return all_frames
+
+    # ------------------------------------------------------------------ #
+    # Analysis
+    # ------------------------------------------------------------------ #
+    def analyze_frame(self, frame_path: str | Path, score: float = 1.0) -> FrameAnalysis:
+        frame_path = Path(frame_path)
+        image = imread_rgb(frame_path)
+
+        detections = self.detector.detect(image)
+        detections = self.segmenter.refine(image, detections)
+        violations = evaluate_rules(detections)
+
+        explanation: Optional[str] = None
+        if violations:
+            try:
+                explanation = self.vlm.explain_violation(image, violations)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("VLM explanation failed: %s", exc)
+
+        annotated_path: Optional[str] = None
+        if detections:
+            annotated = draw_overlays(image, detections)
+            ann_dir = SETTINGS.data_dir / "annotated"
+            ann_dir.mkdir(parents=True, exist_ok=True)
+            out_path = ann_dir / f"{frame_path.stem}_annotated.jpg"
+            imwrite_rgb(out_path, annotated)
+            annotated_path = str(out_path)
+
+        return FrameAnalysis(
+            frame_id=frame_path.stem,
+            frame_path=str(frame_path),
+            score=float(score),
+            detections=detections,
+            violations=violations,
+            explanation=explanation,
+            annotated_path=annotated_path,
+        )
+
+    def analyze_query(self, query: str, k: int | None = None) -> List[Dict]:
+        """Run the full pipeline for a natural-language query."""
+        k = k or SETTINGS.top_k
+        try:
+            hits = self.index.semantic_search(query, k=k)
+        except FileNotFoundError:
+            logger.error("FAISS index not built. Call ingest() first.")
+            return []
+
+        results: List[FrameAnalysis] = []
+        for hit in hits:
+            fa = self.analyze_frame(hit["frame_path"], score=hit.get("score", 0.0))
+            results.append(fa)
+        return [r.to_dict() for r in results]
+
+    # Convenience: full ingest + analyze in one call.
+    def run(
+        self,
+        inputs: Iterable[str | Path],
+        query: str,
+        fps: float | None = None,
+        k: int | None = None,
+    ) -> List[Dict]:
+        # Skip re-ingestion if the index already exists and no inputs are given.
+        inputs_list = list(inputs)
+        if inputs_list:
+            self.ingest(inputs_list, fps=fps)
+        return self.analyze_query(query, k=k)
+
+
+# Module-level convenience for the spec signature.
+_default_pipeline: Optional[SafeTracePipeline] = None
+
+
+def get_pipeline() -> SafeTracePipeline:
+    global _default_pipeline
+    if _default_pipeline is None:
+        _default_pipeline = SafeTracePipeline()
+    return _default_pipeline
+
+
+def analyze_query(query: str, k: int | None = None) -> List[Dict]:
+    return get_pipeline().analyze_query(query, k=k)
+</file>
+
+<file path="src/rule_engine.py">
+"""Rule-based safety violation detection.
+
+Each rule operates on a list of :class:`Detection` objects sharing the same
+frame. Masks (refined where possible, otherwise coarse) are compared via IoU
+against the configured thresholds.
+"""
+from __future__ import annotations
+
+import logging
+from typing import List, Optional, Sequence
+
+import numpy as np
+
+from .config import SETTINGS
+from .schemas import Detection, Violation
+from .utils import head_proxy_from_person, mask_iou, torso_proxy_from_person
+
+logger = logging.getLogger("safetrace.rules")
+
+
+def _mask_of(det: Detection) -> Optional[np.ndarray]:
+    return det.refined_mask if det.refined_mask is not None else det.coarse_mask
+
+
+def _filter(detections: Sequence[Detection], label: str) -> List[Detection]:
+    return [d for d in detections if d.label == label]
+
+
+def _best_person_mask(detections: Sequence[Detection]) -> Optional[np.ndarray]:
+    persons = sorted(_filter(detections, "person"), key=lambda d: -d.confidence)
+    for p in persons:
+        m = _mask_of(p)
+        if m is not None and m.any():
+            return m
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Individual rules — return a Violation if triggered, else None
+# --------------------------------------------------------------------------- #
+def rule_helmet_missing(dets: Sequence[Detection]) -> Optional[Violation]:
+    heads = _filter(dets, "head")
+    person_mask = _best_person_mask(dets) if not heads else None
+    head_mask = _mask_of(heads[0]) if heads else (
+        head_proxy_from_person(person_mask) if person_mask is not None else None
+    )
+    if head_mask is None or not head_mask.any():
+        return None  # no head/person evidence — cannot evaluate
+
+    helmets = _filter(dets, "helmet")
+    best_iou = 0.0
+    for hel in helmets:
+        iou = mask_iou(head_mask, _mask_of(hel))
+        best_iou = max(best_iou, iou)
+
+    if best_iou < SETTINGS.helmet_iou_threshold:
+        return Violation(
+            name="helmet_missing",
+            description="Worker head detected without overlapping helmet.",
+            severity="high",
+            confidence=1.0 - best_iou,
+            evidence={"head_helmet_iou": round(best_iou, 4),
+                      "threshold": SETTINGS.helmet_iou_threshold,
+                      "helmet_count": len(helmets)},
+        )
+    return None
+
+
+def rule_hands_off_wheel(dets: Sequence[Detection]) -> Optional[Violation]:
+    hands = _filter(dets, "hand")
+    wheels = _filter(dets, "steering_wheel")
+    if not hands or not wheels:
+        return None
+    wheel_mask = _mask_of(wheels[0])
+    if wheel_mask is None:
+        return None
+    best = 0.0
+    for h in hands:
+        best = max(best, mask_iou(_mask_of(h), wheel_mask))
+    if best < SETTINGS.hands_wheel_iou_threshold:
+        return Violation(
+            name="hands_off_steering_wheel",
+            description="No detected hand overlaps the steering wheel.",
+            severity="high",
+            confidence=1.0 - best,
+            evidence={"hand_wheel_iou": round(best, 4),
+                      "threshold": SETTINGS.hands_wheel_iou_threshold},
+        )
+    return None
+
+
+def rule_phone_use(dets: Sequence[Detection]) -> Optional[Violation]:
+    phones = _filter(dets, "phone")
+    hands = _filter(dets, "hand")
+    if not phones or not hands:
+        return None
+    best = 0.0
+    for p in phones:
+        for h in hands:
+            best = max(best, mask_iou(_mask_of(p), _mask_of(h)))
+    if best > SETTINGS.phone_hand_iou_threshold:
+        return Violation(
+            name="phone_use",
+            description="Phone overlaps with a hand region.",
+            severity="medium",
+            confidence=best,
+            evidence={"phone_hand_iou": round(best, 4),
+                      "threshold": SETTINGS.phone_hand_iou_threshold},
+        )
+    return None
+
+
+def rule_seatbelt_missing(dets: Sequence[Detection]) -> Optional[Violation]:
+    persons = _filter(dets, "person")
+    if not persons:
+        return None
+    person_mask = _best_person_mask(dets)
+    torso_dets = _filter(dets, "torso")
+    torso_mask = _mask_of(torso_dets[0]) if torso_dets else (
+        torso_proxy_from_person(person_mask) if person_mask is not None else None
+    )
+    if torso_mask is None or not torso_mask.any():
+        return None
+    belts = _filter(dets, "seatbelt")
+    best = 0.0
+    for b in belts:
+        best = max(best, mask_iou(_mask_of(b), torso_mask))
+    if best < SETTINGS.seatbelt_iou_threshold:
+        return Violation(
+            name="seatbelt_missing",
+            description="Person torso detected without an overlapping seatbelt.",
+            severity="high",
+            confidence=1.0 - best,
+            evidence={"seatbelt_torso_iou": round(best, 4),
+                      "threshold": SETTINGS.seatbelt_iou_threshold,
+                      "seatbelt_count": len(belts)},
+        )
+    return None
+
+
+RULES = [
+    rule_helmet_missing,
+    rule_hands_off_wheel,
+    rule_phone_use,
+    rule_seatbelt_missing,
+]
+
+
+def evaluate(detections: Sequence[Detection]) -> List[Violation]:
+    violations: List[Violation] = []
+    for rule in RULES:
+        try:
+            v = rule(detections)
+            if v is not None:
+                violations.append(v)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Rule %s failed: %s", rule.__name__, exc)
+    return violations
+</file>
+
+<file path="src/schemas.py">
+"""Shared dataclasses / typed dicts used across SafeTrace modules."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field, asdict
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+
+
+@dataclass
+class Detection:
+    """Single object instance detected in a frame."""
+
+    label: str                       # canonical SafeTrace label (see config.CLASS_ALIASES)
+    raw_label: str                   # original model label
+    confidence: float
+    bbox: List[float]                # [x1, y1, x2, y2] in pixel coords
+    coarse_mask: Optional[np.ndarray] = None  # HxW bool, original frame size
+    refined_mask: Optional[np.ndarray] = None  # HxW bool, original frame size
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "label": self.label,
+            "raw_label": self.raw_label,
+            "confidence": float(self.confidence),
+            "bbox": [float(v) for v in self.bbox],
+            "has_refined_mask": self.refined_mask is not None,
+        }
+
+
+@dataclass
+class Violation:
+    name: str                                # e.g. "helmet_missing"
+    description: str
+    severity: str = "medium"                 # low | medium | high | critical
+    confidence: float = 1.0
+    evidence: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "severity": self.severity,
+            "confidence": float(self.confidence),
+            "evidence": self.evidence,
+        }
+
+
+@dataclass
+class FrameAnalysis:
+    frame_id: str
+    frame_path: str
+    score: float                              # FAISS similarity (or 1.0 for direct)
+    detections: List[Detection] = field(default_factory=list)
+    violations: List[Violation] = field(default_factory=list)
+    explanation: Optional[str] = None
+    annotated_path: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "frame_id": self.frame_id,
+            "frame_path": self.frame_path,
+            "score": float(self.score),
+            "detections": [d.to_dict() for d in self.detections],
+            "violations": [v.to_dict() for v in self.violations],
+            "explanation": self.explanation,
+            "annotated_path": self.annotated_path,
+        }
+</file>
+
+<file path="src/utils.py">
+"""Shared utilities: device selection, frame extraction, IoU, overlay drawing."""
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import Iterable, List, Optional, Tuple
+
+import cv2
+import numpy as np
+
+logger = logging.getLogger("safetrace.utils")
+
+
+# --------------------------------------------------------------------------- #
+# Device
+# --------------------------------------------------------------------------- #
+def resolve_device(pref: str = "auto") -> str:
+    """Pick 'cuda' if available else 'cpu'. ``pref`` may force a value."""
+    pref = (pref or "auto").lower()
+    if pref in {"cpu", "cuda"}:
+        return pref
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:  # pragma: no cover - torch always present in container
+        return "cpu"
+
+
+# --------------------------------------------------------------------------- #
+# IO
+# --------------------------------------------------------------------------- #
+def imread_rgb(path: str | Path) -> np.ndarray:
+    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if img is None:
+        raise FileNotFoundError(f"Cannot read image: {path}")
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+
+def imwrite_rgb(path: str | Path, img: np.ndarray) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(path), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+
+
+def write_json(path: str | Path, payload) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, default=str)
+
+
+def read_json(path: str | Path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+# --------------------------------------------------------------------------- #
+# Frame extraction
+# --------------------------------------------------------------------------- #
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+
+
+def is_video(path: str | Path) -> bool:
+    return Path(path).suffix.lower() in VIDEO_EXTS
+
+
+def is_image(path: str | Path) -> bool:
+    return Path(path).suffix.lower() in IMAGE_EXTS
+
+
+def extract_frames(
+    video_path: str | Path,
+    out_dir: str | Path,
+    fps: float = 1.0,
+    max_frames: int = 600,
+    prefix: Optional[str] = None,
+) -> List[Path]:
+    """Sample frames from ``video_path`` at ``fps`` and write to ``out_dir``.
+
+    Returns the list of written frame paths in capture order.
+    """
+    video_path = Path(video_path)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    step = max(int(round(src_fps / max(fps, 1e-6))), 1)
+    prefix = prefix or video_path.stem
+
+    saved: List[Path] = []
+    idx = 0
+    sampled = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if idx % step == 0:
+            out_path = out_dir / f"{prefix}_{sampled:06d}.jpg"
+            cv2.imwrite(str(out_path), frame)
+            saved.append(out_path)
+            sampled += 1
+            if sampled >= max_frames:
+                break
+        idx += 1
+    cap.release()
+    logger.info("Extracted %d frames from %s", len(saved), video_path.name)
+    return saved
+
+
+def collect_inputs(paths: Iterable[str | Path]) -> Tuple[List[Path], List[Path]]:
+    """Split a list of inputs into (videos, images)."""
+    videos, images = [], []
+    for p in paths:
+        p = Path(p)
+        if is_video(p):
+            videos.append(p)
+        elif is_image(p):
+            images.append(p)
+    return videos, images
+
+
+# --------------------------------------------------------------------------- #
+# Mask / geometry
+# --------------------------------------------------------------------------- #
+def mask_iou(a: Optional[np.ndarray], b: Optional[np.ndarray]) -> float:
+    if a is None or b is None:
+        return 0.0
+    if a.shape != b.shape:
+        b = cv2.resize(b.astype(np.uint8), (a.shape[1], a.shape[0]),
+                       interpolation=cv2.INTER_NEAREST).astype(bool)
+    a_b = a.astype(bool)
+    b_b = b.astype(bool)
+    inter = np.logical_and(a_b, b_b).sum()
+    union = np.logical_or(a_b, b_b).sum()
+    if union == 0:
+        return 0.0
+    return float(inter) / float(union)
+
+
+def bbox_iou(a: List[float], b: List[float]) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return float(inter / union) if union > 0 else 0.0
+
+
+def torso_proxy_from_person(person_mask: np.ndarray) -> np.ndarray:
+    """Approximate a torso region as the central vertical band of a person mask."""
+    if person_mask is None or not person_mask.any():
+        return np.zeros_like(person_mask, dtype=bool) if person_mask is not None else None
+    ys, xs = np.where(person_mask)
+    y_min, y_max = ys.min(), ys.max()
+    h = y_max - y_min
+    # torso ~ top 25% .. 70% of person bbox
+    t_top = int(y_min + 0.25 * h)
+    t_bot = int(y_min + 0.70 * h)
+    out = np.zeros_like(person_mask, dtype=bool)
+    out[t_top:t_bot, :] = person_mask[t_top:t_bot, :]
+    return out
+
+
+def head_proxy_from_person(person_mask: np.ndarray) -> np.ndarray:
+    if person_mask is None or not person_mask.any():
+        return np.zeros_like(person_mask, dtype=bool) if person_mask is not None else None
+    ys, _ = np.where(person_mask)
+    y_min, y_max = ys.min(), ys.max()
+    h = y_max - y_min
+    h_bot = int(y_min + 0.20 * h)
+    out = np.zeros_like(person_mask, dtype=bool)
+    out[y_min:h_bot, :] = person_mask[y_min:h_bot, :]
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Overlays
+# --------------------------------------------------------------------------- #
+_PALETTE = [
+    (255, 56, 56), (255, 159, 56), (255, 218, 56), (138, 255, 56),
+    (56, 255, 167), (56, 218, 255), (56, 95, 255), (167, 56, 255),
+    (255, 56, 218), (255, 56, 95),
+]
+
+
+def _color_for(label: str) -> Tuple[int, int, int]:
+    return _PALETTE[hash(label) % len(_PALETTE)]
+
+
+def draw_overlays(image_rgb: np.ndarray, detections, alpha: float = 0.4) -> np.ndarray:
+    """Render boxes + masks for a list of Detection objects."""
+    out = image_rgb.copy()
+    overlay = out.copy()
+    for det in detections:
+        color = _color_for(det.label or det.raw_label)
+        mask = det.refined_mask if det.refined_mask is not None else det.coarse_mask
+        if mask is not None and mask.any():
+            overlay[mask.astype(bool)] = color
+        x1, y1, x2, y2 = [int(v) for v in det.bbox]
+        cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+        text = f"{det.label or det.raw_label} {det.confidence:.2f}"
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        cv2.rectangle(out, (x1, max(0, y1 - th - 6)), (x1 + tw + 4, y1), color, -1)
+        cv2.putText(out, text, (x1 + 2, y1 - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+    out = cv2.addWeighted(overlay, alpha, out, 1 - alpha, 0)
+    return out
+</file>
+
+<file path="src/vlm_reasoner.py">
+"""Optional local Vision-Language Model reasoning.
+
+Provides natural-language explanations for detected violations using a small
+local VLM such as ``microsoft/Phi-3-vision-128k-instruct`` or
+``openbmb/MiniCPM-V``. If the local snapshot is missing or the load fails,
+``explain_violation`` falls back to a deterministic, evidence-based summary
+so the pipeline never depends on the VLM being present.
+"""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Sequence
+
+import numpy as np
+from PIL import Image
+
+from .config import SETTINGS
+from .schemas import Violation
+from .utils import resolve_device
+
+logger = logging.getLogger("safetrace.vlm")
+
+
+def _fallback_explanation(violations: Sequence[Violation]) -> str:
+    if not violations:
+        return "No safety violations were detected in this frame."
+    parts = []
+    for v in violations:
+        ev = ", ".join(f"{k}={val}" for k, val in v.evidence.items())
+        parts.append(f"- {v.name} ({v.severity}): {v.description} [{ev}]")
+    return "Detected violations:\n" + "\n".join(parts)
+
+
+class VlmReasoner:
+    def __init__(
+        self,
+        model_dir: str | Path | None = None,
+        device: str | None = None,
+        enabled: bool | None = None,
+    ) -> None:
+        self.device = resolve_device(device or SETTINGS.device)
+        self.model_dir = Path(model_dir or SETTINGS.vlm_model_dir)
+        self.enabled = SETTINGS.enable_vlm if enabled is None else enabled
+        self._model = None
+        self._processor = None
+        self._loaded = False
+
+        if not self.enabled:
+            logger.info("VLM disabled by configuration.")
+            return
+        if not self.model_dir.exists() or not any(self.model_dir.iterdir()):
+            logger.warning("VLM model dir empty/missing at %s; disabling.", self.model_dir)
+            self.enabled = False
+            return
+
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoProcessor
+
+            logger.info("Loading VLM from %s on %s", self.model_dir, self.device)
+            self._processor = AutoProcessor.from_pretrained(
+                str(self.model_dir), trust_remote_code=True, local_files_only=True
+            )
+            self._model = AutoModelForCausalLM.from_pretrained(
+                str(self.model_dir),
+                trust_remote_code=True,
+                local_files_only=True,
+                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+            ).to(self.device).eval()
+            self._loaded = True
+        except Exception as exc:  # pragma: no cover - optional path
+            logger.warning("Failed to load VLM (%s); falling back to text-only.", exc)
+            self.enabled = False
+
+    # ------------------------------------------------------------------ #
+    def explain_violation(self, image: np.ndarray, violations: Sequence[Violation]) -> str:
+        if not self.enabled or not self._loaded:
+            return _fallback_explanation(violations)
+
+        try:
+            import torch
+
+            pil = image if isinstance(image, Image.Image) else Image.fromarray(image)
+            names = ", ".join(v.name for v in violations) or "no obvious violations"
+            prompt = (
+                "You are a workplace safety auditor. Briefly describe what you see "
+                f"in this image and explain whether the following potential safety "
+                f"violations are clearly visible: {names}. "
+                "Respond in 2-3 short sentences."
+            )
+            inputs = self._processor(text=prompt, images=pil, return_tensors="pt").to(self.device)
+            with torch.inference_mode():
+                output_ids = self._model.generate(
+                    **inputs, max_new_tokens=160, do_sample=False
+                )
+            text = self._processor.batch_decode(
+                output_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True
+            )[0]
+            return text.strip() or _fallback_explanation(violations)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("VLM generation failed (%s); using fallback.", exc)
+            return _fallback_explanation(violations)
+</file>
+
+<file path="src/yolo_detector.py">
+"""YOLO segmentation wrapper (Ultralytics).
+
+Default checkpoint is YOLOv9-seg, with an optional fallback to YOLOv8-seg.
+Returns a normalized list of :class:`Detection` objects with coarse masks
+projected back to the original frame size.
+"""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import List, Optional
+
+import cv2
+import numpy as np
+
+from .config import SETTINGS, normalize_label
+from .schemas import Detection
+from .utils import imread_rgb, resolve_device
+
+logger = logging.getLogger("safetrace.yolo")
+
+
+class YoloDetector:
+    def __init__(
+        self,
+        checkpoint: str | Path | None = None,
+        fallback_checkpoint: str | Path | None = None,
+        device: str | None = None,
+        conf: float | None = None,
+        iou: float | None = None,
+    ) -> None:
+        from ultralytics import YOLO  # local import to avoid hard dep at import time
+
+        self.device = resolve_device(device or SETTINGS.device)
+        self.conf = conf if conf is not None else SETTINGS.yolo_conf_threshold
+        self.iou = iou if iou is not None else SETTINGS.yolo_iou_threshold
+
+        ckpt = Path(checkpoint or SETTINGS.yolo_checkpoint)
+        fallback = Path(fallback_checkpoint or SETTINGS.yolo_fallback_checkpoint)
+
+        if ckpt.exists():
+            chosen = ckpt
+        elif fallback.exists():
+            logger.warning("YOLO ckpt %s missing; falling back to %s", ckpt, fallback)
+            chosen = fallback
+        else:
+            raise FileNotFoundError(
+                f"No YOLO checkpoint found at {ckpt} or {fallback}. "
+                "Place a *-seg.pt checkpoint in the checkpoints/ folder."
+            )
+
+        logger.info("Loading YOLO model %s on %s", chosen, self.device)
+        self.model = YOLO(str(chosen))
+        self.checkpoint = chosen
+        # Cache the names dict (Ultralytics returns id->name)
+        self.names = self.model.names if hasattr(self.model, "names") else {}
+
+    # ------------------------------------------------------------------ #
+    def detect(self, image: str | Path | np.ndarray) -> List[Detection]:
+        if isinstance(image, (str, Path)):
+            img = imread_rgb(image)
+        else:
+            img = image
+        h, w = img.shape[:2]
+
+        # Ultralytics expects BGR or PIL; passing RGB ndarray works too via PIL conversion.
+        results = self.model.predict(
+            source=img[:, :, ::-1],  # to BGR for cv2-based loader
+            conf=self.conf,
+            iou=self.iou,
+            device=0 if self.device == "cuda" else "cpu",
+            verbose=False,
+        )
+        if not results:
+            return []
+        r = results[0]
+
+        boxes = getattr(r, "boxes", None)
+        masks = getattr(r, "masks", None)
+        names = getattr(r, "names", self.names) or {}
+        if boxes is None or len(boxes) == 0:
+            return []
+
+        xyxy = boxes.xyxy.detach().cpu().numpy()
+        confs = boxes.conf.detach().cpu().numpy()
+        cls_ids = boxes.cls.detach().cpu().numpy().astype(int)
+
+        # masks.data is (N, Hm, Wm) at model input resolution; resize per-instance.
+        mask_arrs: Optional[np.ndarray] = None
+        if masks is not None and getattr(masks, "data", None) is not None:
+            mask_arrs = masks.data.detach().cpu().numpy()
+
+        detections: List[Detection] = []
+        for i in range(len(xyxy)):
+            raw = str(names.get(int(cls_ids[i]), str(cls_ids[i])))
+            canonical = normalize_label(raw)
+            label = canonical or raw
+
+            coarse: Optional[np.ndarray] = None
+            if mask_arrs is not None and i < len(mask_arrs):
+                m = mask_arrs[i]
+                if m.shape[:2] != (h, w):
+                    m = cv2.resize(m.astype(np.float32), (w, h),
+                                   interpolation=cv2.INTER_NEAREST)
+                coarse = m.astype(bool)
+
+            detections.append(
+                Detection(
+                    label=label,
+                    raw_label=raw,
+                    confidence=float(confs[i]),
+                    bbox=[float(v) for v in xyxy[i].tolist()],
+                    coarse_mask=coarse,
+                )
+            )
+        return detections
+</file>
+
+<file path="docker-compose.yml">
+services:
+  safetrace:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: safetrace:latest
+    container_name: safetrace
+    ports:
+      - "8501:8501"
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      SAFETRACE_OFFLINE: "1"
+      # NOTE: the default Dockerfile ships PyTorch 2.2 + CUDA 12.1, whose kernels
+      # do NOT cover Blackwell (RTX 50-series, sm_120). On such GPUs you'll get
+      # "CUDA error: no kernel image is available for execution on the device".
+      # Either keep this on "cpu", or rebuild with docker/Dockerfile.blackwell
+      # and switch back to "auto"/"cuda". The frontend sidebar lets you flip
+      # between cpu / cuda / auto at runtime.
+      SAFETRACE_DEVICE: "cpu"
+      SAFETRACE_ENABLE_VLM: "0"
+      # Lift Streamlit's default 200 MB upload/message caps. Values are MB;
+      # 51200 = 50 GB. Bound only by host disk / RAM after that.
+      STREAMLIT_SERVER_MAX_UPLOAD_SIZE: "51200"
+      STREAMLIT_SERVER_MAX_MESSAGE_SIZE: "51200"
+      STREAMLIT_SERVER_ADDRESS: "0.0.0.0"
+      STREAMLIT_SERVER_PORT: "8501"
+    volumes:
+      - ./checkpoints:/app/checkpoints:ro
+      - ./data:/app/data
+    gpus: all
+    command: ["ui"]
+    restart: unless-stopped
+</file>
+
+<file path="docker/entrypoint.sh">
+#!/usr/bin/env bash
+# SafeTrace container entrypoint.
+#
+# Usage:
+#   ui                       → launch the Streamlit UI (default)
+#   ingest FILE [FILE ...]   → run main.py ingest
+#   query "TEXT"             → run main.py query
+#   bash                     → drop into a shell
+set -euo pipefail
+
+cd /app
+
+case "${1:-ui}" in
+  ui)
+    shift || true
+    # `maxUploadSize` / `maxMessageSize` are in MB. Default Streamlit caps are
+    # 200 MB; we lift them to 51 200 MB (50 GB) so large videos can be uploaded.
+    # Override via STREAMLIT_SERVER_MAX_UPLOAD_SIZE / _MESSAGE_SIZE.
+    exec streamlit run frontend/app.py \
+        --server.address "${STREAMLIT_SERVER_ADDRESS:-0.0.0.0}" \
+        --server.port "${STREAMLIT_SERVER_PORT:-8501}" \
+        --server.maxUploadSize "${STREAMLIT_SERVER_MAX_UPLOAD_SIZE:-51200}" \
+        --server.maxMessageSize "${STREAMLIT_SERVER_MAX_MESSAGE_SIZE:-51200}" \
+        --server.headless true "$@"
+    ;;
+  ingest|query)
+    exec python main.py "$@"
+    ;;
+  bash|sh)
+    exec /bin/bash
+    ;;
+  *)
+    exec "$@"
+    ;;
+esac
+</file>
+
+<file path="docker/requirements.txt">
+# Pinned for offline GPU container build (CUDA 12.1 / PyTorch 2.2 base image).
+# torch / torchvision come from the base image — do not reinstall.
+
+# Vector search
+# CPU build is the safe default; works regardless of host GPU / CUDA version.
+# Swap to `faiss-gpu-cu12` if you rebuild with a Blackwell-capable PyTorch.
+faiss-cpu==1.8.0.post1
+
+# Vision / ML
+transformers==4.41.2
+accelerate==0.30.1
+sentencepiece==0.2.0
+ultralytics==8.2.50
+mobile-sam @ git+https://github.com/ChaoningZhang/MobileSAM.git@master
+timm==0.9.16
+
+# Image / video IO
+opencv-python-headless==4.10.0.84
+pillow==10.3.0
+numpy==1.26.4
+
+# Frontend
+streamlit==1.35.0
+
+# Misc
+pyyaml==6.0.1
+</file>
+
+<file path="frontend/app.py">
+"""SafeTrace Streamlit UI.
+
+Run:
+    streamlit run frontend/app.py
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+from typing import List
+
+import streamlit as st
+
+# Allow running with `streamlit run frontend/app.py` from project root.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.config import SETTINGS  # noqa: E402
+from src.pipeline import SafeTracePipeline  # noqa: E402
+from src.utils import imread_rgb, resolve_device  # noqa: E402
+
+st.set_page_config(page_title="SafeTrace", layout="wide", page_icon="🦺")
+
+
+@st.cache_data(show_spinner=False)
+def _cuda_status() -> dict:
+    """Probe whether CUDA is *actually usable* on this host.
+
+    `torch.cuda.is_available()` only checks that a driver + device are
+    visible; it does NOT check that the installed PyTorch wheel ships
+    kernels for the GPU's compute capability. On Blackwell (RTX 50-series,
+    sm_120) the default cu12.1 wheels report `is_available() == True` but
+    crash on the first conv with:
+
+        CUDA error: no kernel image is available for execution on the device
+
+    We run a tiny conv to detect that case up-front so the UI can disable
+    the CUDA toggle and fall back to CPU instead of failing mid-pipeline.
+    """
+    info = {"available": False, "name": None, "compute_cap": None,
+            "usable": False, "error": None}
+    try:
+        import torch
+    except Exception as exc:
+        info["error"] = f"torch import failed: {exc}"
+        return info
+
+    if not torch.cuda.is_available():
+        return info
+    info["available"] = True
+    try:
+        info["name"] = torch.cuda.get_device_name(0)
+        major, minor = torch.cuda.get_device_capability(0)
+        info["compute_cap"] = f"{major}.{minor}"
+    except Exception:
+        pass
+
+    try:
+        # Smallest possible conv that exercises the same kernel path the
+        # SigLIP patch embedder uses.
+        x = torch.randn(1, 3, 8, 8, device="cuda")
+        w = torch.randn(2, 3, 3, 3, device="cuda")
+        torch.nn.functional.conv2d(x, w)
+        torch.cuda.synchronize()
+        info["usable"] = True
+    except Exception as exc:
+        info["error"] = str(exc).splitlines()[0]
+    return info
+
+
+# --------------------------------------------------------------------------- #
+# Cached pipeline (one instance per device choice)
+# --------------------------------------------------------------------------- #
+@st.cache_resource(show_spinner="Loading SafeTrace models …")
+def get_pipeline(device: str) -> SafeTracePipeline:
+    # Propagate the chosen device to the global SETTINGS so every component
+    # picks it up (ClipEmbedder, YoloDetector, MobileSAM, VLM).
+    SETTINGS.device = device
+    os.environ["SAFETRACE_DEVICE"] = device
+    return SafeTracePipeline()
+
+
+# --------------------------------------------------------------------------- #
+# Sidebar
+# --------------------------------------------------------------------------- #
+with st.sidebar:
+    st.title("🦺 SafeTrace")
+    st.caption("Offline safety violation detection")
+
+    fps = st.number_input("Frame sampling FPS", 0.1, 30.0, float(SETTINGS.frame_fps), 0.1)
+    top_k = st.slider("Top-K frames to analyze", 1, 20, int(SETTINGS.top_k))
+    enable_vlm = st.toggle("Enable VLM explanations", value=SETTINGS.enable_vlm,
+                           help="Requires a local VLM checkpoint in checkpoints/vlm_model/")
+
+    st.divider()
+    st.subheader("Compute")
+    cuda = _cuda_status()
+    cuda_ok = cuda["usable"]
+    device_options = ["cpu", "cuda", "auto"]
+    default_choice = SETTINGS.device if SETTINGS.device in device_options else "cpu"
+    device_choice = st.selectbox(
+        "Device",
+        device_options,
+        index=device_options.index(default_choice),
+        help=(
+            "`cpu` is the safest default. `cuda` enables GPU acceleration but "
+            "requires a PyTorch build with kernels for your GPU's compute "
+            "capability \u2014 see docker/Dockerfile.blackwell for RTX 50-series. "
+            "`auto` picks CUDA if usable, else CPU."
+        ),
+    )
+
+    # Decide what device we will actually run on. If the user asked for cuda
+    # (explicitly or via `auto`) but the probe failed, we silently fall back
+    # to CPU and tell them why instead of crashing the pipeline later.
+    if device_choice == "cpu":
+        resolved_device = "cpu"
+    elif cuda_ok:
+        resolved_device = "cuda"
+    else:
+        resolved_device = "cpu"
+        if device_choice in {"cuda", "auto"}:
+            if cuda["available"]:
+                st.error(
+                    f"GPU detected ({cuda['name']}, sm_{cuda['compute_cap']}) "
+                    "but the installed PyTorch build has no kernels for it. "
+                    "Falling back to CPU.\n\n"
+                    f"Probe error: `{cuda['error']}`\n\n"
+                    "Rebuild with `docker/Dockerfile.blackwell` for RTX 50-series "
+                    "(sm_120), or use a PyTorch wheel matching your GPU."
+                )
+            else:
+                st.warning(
+                    "No CUDA device is visible to this container. "
+                    "Falling back to CPU."
+                )
+
+    st.divider()
+    st.subheader("System")
+    st.write(f"Resolved device: `{resolved_device}`")
+    if cuda["available"]:
+        st.write(f"GPU: `{cuda['name']}` (sm_{cuda['compute_cap']})")
+        usable_icon = "\u2705" if cuda_ok else "\u274c"
+        st.write(f"GPU usable by PyTorch: {usable_icon}")
+    else:
+        st.write("GPU: not detected")
+    st.write(f"Embedding model: `{SETTINGS.siglip_model_dir.name}`")
+    st.write(f"Detector: `{SETTINGS.yolo_checkpoint.name}`")
+    st.write("MobileSAM:", "\u2705" if SETTINGS.mobile_sam_checkpoint.exists() else "\u26a0\ufe0f missing")
+
+
+# --------------------------------------------------------------------------- #
+# Header
+# --------------------------------------------------------------------------- #
+st.title("Safety Violation Detection")
+st.write(
+    "Upload a **video** or one or more **images**, type a natural-language "
+    "query (e.g. *worker without helmet*), and click **Analyze**."
+)
+
+uploaded = st.file_uploader(
+    "Upload media",
+    type=["jpg", "jpeg", "png", "bmp", "webp", "mp4", "mov", "avi", "mkv", "webm"],
+    accept_multiple_files=True,
+)
+
+query = st.text_input(
+    "Query",
+    value="worker without helmet",
+    help="Used by FAISS to retrieve the most relevant frames before detection.",
+)
+
+col_a, col_b = st.columns([1, 5])
+analyze = col_a.button("🚀 Analyze", type="primary", use_container_width=True)
+reset = col_b.button("Reset session", use_container_width=False)
+
+if reset:
+    st.session_state.clear()
+    st.rerun()
+
+
+# --------------------------------------------------------------------------- #
+# Analysis
+# --------------------------------------------------------------------------- #
+def _persist_uploads(files) -> List[Path]:
+    out: List[Path] = []
+    tmp_dir = Path(tempfile.mkdtemp(prefix="safetrace_"))
+    for f in files:
+        dst = tmp_dir / f.name
+        with open(dst, "wb") as fh:
+            fh.write(f.getbuffer())
+        out.append(dst)
+    return out
+
+
+if analyze:
+    if not uploaded:
+        st.warning("Please upload at least one image or video.")
+    elif not query.strip():
+        st.warning("Please enter a query.")
+    else:
+        SETTINGS.enable_vlm = enable_vlm  # propagate UI toggle
+        SETTINGS.frame_fps = float(fps)
+        SETTINGS.top_k = int(top_k)
+
+        pipeline = get_pipeline(resolved_device)
+        pipeline.vlm.enabled = enable_vlm and pipeline.vlm._loaded
+
+        with st.status("Running pipeline…", expanded=True) as status:
+            st.write("• Saving uploads")
+            files = _persist_uploads(uploaded)
+
+            st.write("• Extracting frames + building FAISS index")
+            try:
+                pipeline.ingest(files, fps=fps)
+            except Exception as exc:
+                status.update(label="Ingestion failed", state="error")
+                st.exception(exc)
+                st.stop()
+
+            st.write(f"• Retrieving top-{top_k} frames for query: *{query}*")
+            try:
+                results = pipeline.analyze_query(query, k=top_k)
+            except Exception as exc:
+                status.update(label="Analysis failed", state="error")
+                st.exception(exc)
+                st.stop()
+
+            status.update(label=f"Done — {len(results)} frames analyzed", state="complete")
+
+        st.session_state["results"] = results
+        st.session_state["query"] = query
+
+
+# --------------------------------------------------------------------------- #
+# Results display
+# --------------------------------------------------------------------------- #
+results = st.session_state.get("results")
+if results:
+    st.subheader(f"Results for: *{st.session_state.get('query', '')}*")
+
+    report_bytes = json.dumps(results, indent=2).encode("utf-8")
+    st.download_button(
+        "⬇️ Download JSON report",
+        data=report_bytes,
+        file_name="safetrace_report.json",
+        mime="application/json",
+    )
+
+    for idx, frame in enumerate(results, start=1):
+        st.markdown(f"### Frame {idx} — `{frame['frame_id']}`  (score `{frame['score']:.3f}`)")
+
+        c_img, c_meta = st.columns([2, 1], gap="large")
+        with c_img:
+            img_path = frame.get("annotated_path") or frame.get("frame_path")
+            if img_path and Path(img_path).exists():
+                st.image(imread_rgb(img_path), caption=Path(img_path).name,
+                         use_column_width=True)
+
+        with c_meta:
+            violations = frame.get("violations", [])
+            if violations:
+                st.error(f"{len(violations)} violation(s) detected")
+                for v in violations:
+                    st.markdown(
+                        f"**{v['name']}** ({v['severity']})  \n"
+                        f"{v['description']}  \n"
+                        f"Confidence: `{v['confidence']:.2f}`"
+                    )
+                    st.json(v["evidence"])
+            else:
+                st.success("No violations detected")
+
+            if frame.get("explanation"):
+                st.markdown("**Explanation**")
+                st.write(frame["explanation"])
+
+            with st.expander("Detections"):
+                st.json(frame.get("detections", []))
+
+        st.divider()
+else:
+    st.info("Upload media and click **Analyze** to begin.")
+</file>
+
+<file path="README.md">
+# SafeTrace
+
+Modular, **fully-offline**, GPU-ready safety-violation detection system.
+Upload videos or images, the pipeline retrieves the most relevant frames
+with SigLIP + FAISS, detects objects with YOLOv9-seg + MobileSAM, applies
+a deterministic rule engine, and (optionally) generates natural-language
+explanations with a local VLM. Results are served through a Streamlit UI.
+
+---
+
+## Architecture
+
+```
+User upload (video / images)
+        │
+        ▼
+Frame Sampler (configurable FPS)
+        │
+        ▼
+SigLIP image embeddings ──► FAISS IndexFlatIP (data/index.faiss)
+        │
+        ▼
+semantic_search(query, k) ─ top-K candidate frames
+        │
+        ▼
+YOLOv9-seg ── boxes + coarse masks
+        │
+        ▼
+MobileSAM (vit_t) ── refined binary masks per box
+        │
+        ▼
+Rule engine
+   • helmet_missing       IoU(head, helmet)        < 0.20
+   • hands_off_wheel      IoU(hand, wheel)         < 0.10
+   • phone_use            IoU(phone, hand)         > 0.30
+   • seatbelt_missing     IoU(seatbelt, torso)     < 0.20
+        │
+        ▼
+Optional VLM (Phi-3-Vision / MiniCPM-V) — natural language summary
+        │
+        ▼
+Streamlit UI: overlays, evidence table, JSON download
+```
+
+---
+
+## Project layout
+
+```
+SafeTrace/
+├── src/
+│   ├── clip_embedder.py         # SigLIP / CLIP loader + batch embeddings
+│   ├── faiss_index.py           # IndexFlatIP build / load / semantic_search
+│   ├── yolo_detector.py         # YOLOv9-seg (Ultralytics) wrapper
+│   ├── mobile_sam_segmenter.py  # MobileSAM box → refined mask
+│   ├── rule_engine.py           # IoU-based safety rules
+│   ├── vlm_reasoner.py          # Optional local VLM explanations
+│   ├── pipeline.py              # End-to-end orchestrator + analyze_query()
+│   ├── schemas.py               # Detection / Violation / FrameAnalysis
+│   ├── utils.py                 # Frame extraction, IoU, overlays, IO
+│   └── config.py                # Central settings (env-overridable)
+├── frontend/
+│   └── app.py                   # Streamlit UI
+├── data/                        # Frames, embeddings, FAISS index, annotated outputs
+├── checkpoints/                 # Local model weights (mounted in Docker)
+├── docker/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── entrypoint.sh
+├── main.py                      # CLI: ingest / query / ui
+└── README.md
+```
+
+---
+
+## Local checkpoints (required for offline mode)
+
+Place each checkpoint under `checkpoints/`:
+
+| Component   | Default path                                            | How to obtain                               |
+|-------------|---------------------------------------------------------|---------------------------------------------|
+| SigLIP      | `checkpoints/siglip-base-patch16-224/`                  | `huggingface-cli download google/siglip-base-patch16-224 --local-dir checkpoints/siglip-base-patch16-224` |
+| YOLOv9-seg  | `checkpoints/yolov9c-seg.pt`                            | Ultralytics release asset                   |
+| YOLOv8-seg* | `checkpoints/yolov8s-seg.pt` *(fallback)*               | Ultralytics release asset                   |
+| MobileSAM   | `checkpoints/mobile_sam.pt`                             | https://github.com/ChaoningZhang/MobileSAM  |
+| VLM (opt.)  | `checkpoints/vlm_model/`                                | e.g. `microsoft/Phi-3-vision-128k-instruct` |
+
+All paths are overridable via environment variables — see `src/config.py`.
+
+---
+
+## Quick start (local Python)
+
+```bash
+pip install -r docker/requirements.txt   # or your own pinned env
+python main.py ingest path/to/video.mp4 path/to/image.jpg
+python main.py query "worker without helmet" --k 5 --output report.json
+python main.py ui                        # http://localhost:8501
+```
+
+---
+
+## Docker (GPU + offline)
+
+Two Dockerfiles are provided:
+
+| File                                | Base                              | When to use                                                                 |
+|-------------------------------------|-----------------------------------|-----------------------------------------------------------------------------|
+| `docker/Dockerfile`                 | `pytorch/pytorch:2.2.0-cuda12.1`  | Default. CPU-safe; CUDA works on Ampere/Ada (sm_80–sm_89).                   |
+| `docker/Dockerfile.blackwell`       | `nvidia/cuda:12.8.0` + torch 2.7  | Required for **RTX 50-series / Blackwell (sm_120)** — the default image lacks kernels for those GPUs and will raise *"CUDA error: no kernel image is available for execution on the device"*. |
+
+Build the default image:
+```bash
+docker build -f docker/Dockerfile -t safetrace:latest .
+```
+
+Build the Blackwell-capable image (RTX 50-series):
+```bash
+docker build -f docker/Dockerfile.blackwell -t safetrace:blackwell .
+# then change `image:` in docker-compose.yml and set SAFETRACE_DEVICE: "auto"
+```
+
+Run with GPU and your local checkpoints / data mounted:
+```bash
+docker run --gpus all --rm -it \
+    -p 8501:8501 \
+    -v "$(pwd)/checkpoints:/app/checkpoints:ro" \
+    -v "$(pwd)/data:/app/data" \
+    safetrace:latest
+```
+Open http://localhost:8501.
+
+CLI variants:
+```bash
+docker run --gpus all --rm \
+    -v "$(pwd)/checkpoints:/app/checkpoints:ro" \
+    -v "$(pwd)/data:/app/data" \
+    safetrace:latest ingest /app/data/in.mp4
+
+docker run --gpus all --rm \
+    -v "$(pwd)/checkpoints:/app/checkpoints:ro" \
+    -v "$(pwd)/data:/app/data" \
+    safetrace:latest query "driver using phone" --k 5
+```
+
+---
+
+## Configuration
+
+All settings live in `src/config.py` and accept environment overrides:
+
+| Env var                      | Default                                          | Purpose                          |
+|------------------------------|--------------------------------------------------|----------------------------------|
+| `SAFETRACE_DEVICE`           | `auto`                                           | `auto` / `cuda` / `cpu` (also switchable from the UI sidebar) |
+| `SAFETRACE_OFFLINE`          | `1`                                              | Force HF + transformers offline  |
+| `SAFETRACE_ENABLE_VLM`       | `0`                                              | Enable optional VLM explanations |
+| `SAFETRACE_FPS`              | `1.0`                                            | Frame sampling FPS               |
+| `SAFETRACE_TOPK`             | `5`                                              | Default semantic-search k        |
+| `SAFETRACE_SIGLIP_DIR`       | `checkpoints/siglip-base-patch16-224`            | Embedding model dir              |
+| `SAFETRACE_YOLO_CKPT`        | `checkpoints/yolov9c-seg.pt`                     | Detector weights                 |
+| `SAFETRACE_MSAM_CKPT`        | `checkpoints/mobile_sam.pt`                      | MobileSAM weights                |
+| `SAFETRACE_VLM_DIR`          | `checkpoints/vlm_model`                          | Optional VLM dir                 |
+| `STREAMLIT_SERVER_MAX_UPLOAD_SIZE` | `51200`                                    | Per-file upload limit in **MB** (default 50 GB) |
+| `STREAMLIT_SERVER_MAX_MESSAGE_SIZE`| `51200`                                    | Streamlit websocket message cap in **MB**       |
+
+### Frontend controls
+
+The Streamlit sidebar exposes:
+- **Frame sampling FPS / Top-K / VLM toggle** — same semantics as the CLI flags.
+- **Compute › Device** — switch between `cpu`, `cuda`, and `auto` at runtime.
+  Changing the device transparently rebuilds the model cache. If `cuda` is
+  selected on an image without GPU kernels for your card, the UI warns and
+  falls back to CPU. For RTX 50-series GPUs use the Blackwell image (above).
+- **Uploads** — the server cap is lifted to 50 GB; tune via
+  `STREAMLIT_SERVER_MAX_UPLOAD_SIZE` (MB).
+
+---
+
+## Programmatic usage
+
+```python
+from src.pipeline import SafeTracePipeline
+
+pipe = SafeTracePipeline()
+pipe.ingest(["video.mp4", "image.jpg"], fps=1.0)
+results = pipe.analyze_query("driver not wearing seatbelt", k=5)
+# results: List[Dict] with frame metadata, detections, violations, explanation
+```
+
+Or, matching the spec signature:
+```python
+from src.pipeline import analyze_query
+results = analyze_query("worker without helmet")
+```
+
+---
+
+## Notes
+
+- The system never reaches the network at runtime: HuggingFace offline flags
+  are set in both the container and `src/config.py`.
+- MobileSAM and the VLM are **optional**: if checkpoints are missing the
+  pipeline degrades gracefully (YOLO masks only, deterministic explanations).
+- YOLO label spaces vary across checkpoints; `src/config.py` contains a
+  configurable `CLASS_ALIASES` map normalizing labels for the rule engine.
+</file>
+
+</files>

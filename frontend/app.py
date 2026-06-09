@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 from src.config import SETTINGS  # noqa: E402
 from src.pipeline import SafeTracePipeline  # noqa: E402
 from src.utils import imread_rgb, resolve_device  # noqa: E402
+from src.queue_manager import submit_task
 
 st.set_page_config(page_title="SafeTrace", layout="wide", page_icon="🦺")
 
@@ -192,7 +193,12 @@ def _persist_uploads(files) -> List[Path]:
     for f in files:
         dst = tmp_dir / f.name
         with open(dst, "wb") as fh:
-            fh.write(f.getbuffer())
+            # Read in chunks to prevent memory spikes on large batch uploads
+            while True:
+                chunk = f.read(8192)
+                if not chunk:
+                    break
+                fh.write(chunk)
         out.append(dst)
     return out
 
@@ -211,20 +217,22 @@ if analyze:
         pipeline.vlm.enabled = enable_vlm and pipeline.vlm._loaded
 
         with st.status("Running pipeline…", expanded=True) as status:
-            st.write("• Saving uploads")
+            st.write("• Saving uploads to disk safely")
             files = _persist_uploads(uploaded)
 
-            st.write("• Extracting frames + building FAISS index")
+            st.write("• Task in queue: Extracting frames & building index")
             try:
-                pipeline.ingest(files, fps=fps)
+                # Submit to the queue and block the UI thread until done
+                submit_task(pipeline.ingest, files, fps=fps).result()
             except Exception as exc:
                 status.update(label="Ingestion failed", state="error")
                 st.exception(exc)
                 st.stop()
 
-            st.write(f"• Retrieving top-{top_k} frames for query: *{query}*")
+            st.write(f"• Task in queue: Retrieving top-{top_k} frames for query: *{query}*")
             try:
-                results = pipeline.analyze_query(query, k=top_k)
+                # Submit to the queue and block the UI thread until done
+                results = submit_task(pipeline.analyze_query, query, k=top_k).result()
             except Exception as exc:
                 status.update(label="Analysis failed", state="error")
                 st.exception(exc)
