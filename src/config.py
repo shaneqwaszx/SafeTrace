@@ -37,6 +37,16 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
+def _vlm_evidence_frame_budget() -> int:
+    if os.environ.get("SAFETRACE_VLM_FRAME_LIMIT") is not None:
+        return _env_int("SAFETRACE_VLM_FRAME_LIMIT", 5)
+    if os.environ.get("SAFETRACE_VLM_MAX_EVIDENCE_FRAMES") is not None:
+        return _env_int("SAFETRACE_VLM_MAX_EVIDENCE_FRAMES", 5)
+    if os.environ.get("SAFETRACE_VLM_MAX_FRAMES") is not None:
+        return _env_int("SAFETRACE_VLM_MAX_FRAMES", 5)
+    return 5
+
+
 def _env_bool(key: str, default: bool) -> bool:
     raw = os.environ.get(key)
     if raw is None:
@@ -128,23 +138,58 @@ class Settings:
             _env("SAFETRACE_VLM_LIGHTWEIGHT_MODEL_PATH", str(PROJECT_ROOT / "models" / "vlm" / "lightweight-256m"))
         )
     )
+    vlm_lightweight_512m_model_path: Path = field(
+        default_factory=lambda: Path(
+            _env(
+                "SAFETRACE_VLM_LIGHTWEIGHT_512M_MODEL_PATH",
+                str(PROJECT_ROOT / "models" / "vlm" / "lightweight-512m"),
+            )
+        )
+    )
     vlm_enhanced_model_path: Path = field(
         default_factory=lambda: Path(
             _env("SAFETRACE_VLM_ENHANCED_MODEL_PATH", str(PROJECT_ROOT / "models" / "vlm" / "enhanced-2b"))
         )
     )
+    vlm_enhanced_3b_model_path: Path = field(
+        default_factory=lambda: Path(
+            _env(
+                "SAFETRACE_VLM_ENHANCED_3B_MODEL_PATH",
+                str(PROJECT_ROOT / "models" / "vlm" / "enhanced-3b"),
+            )
+        )
+    )
     vlm_timeout_seconds: float = field(default_factory=lambda: _env_float("SAFETRACE_VLM_TIMEOUT_SECONDS", 10.0))
-    vlm_max_frames: int = field(default_factory=lambda: _env_int("SAFETRACE_VLM_MAX_FRAMES", 1))
-    vlm_max_tokens: int = field(default_factory=lambda: _env_int("SAFETRACE_VLM_MAX_TOKENS", 180))
+    vlm_max_frames: int = field(default_factory=lambda: _env_int("SAFETRACE_VLM_MAX_FRAMES", 5))
+    vlm_max_evidence_frames: int = field(default_factory=_vlm_evidence_frame_budget)
+    vlm_max_tokens: int = field(default_factory=lambda: _env_int("SAFETRACE_VLM_MAX_TOKENS", 40))
+    lightweight_vlm_primary: str = field(default_factory=lambda: _env("SAFETRACE_LIGHTWEIGHT_VLM_PRIMARY", "auto"))
+    lightweight_vlm_fallback: str = field(default_factory=lambda: _env("SAFETRACE_LIGHTWEIGHT_VLM_FALLBACK", "256m"))
+    lightweight_vlm_cpu_prefer_256m: bool = field(
+        default_factory=lambda: _env_bool("SAFETRACE_LIGHTWEIGHT_VLM_CPU_PREFER_256M", True)
+    )
+    lightweight_vlm_timeout_seconds: float = field(
+        default_factory=lambda: _env_float("SAFETRACE_LIGHTWEIGHT_VLM_TIMEOUT_SECONDS", 90.0)
+    )
+    lightweight_vlm_total_budget_seconds: float = field(
+        default_factory=lambda: _env_float("SAFETRACE_LIGHTWEIGHT_VLM_TOTAL_BUDGET_SECONDS", 0.0)
+    )
     lightweight_vlm_worker_enabled: bool = field(
         default_factory=lambda: _env_bool("SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED", False)
     )
     lightweight_vlm_worker_timeout_seconds: float = field(
         default_factory=lambda: _env_float("SAFETRACE_LIGHTWEIGHT_VLM_WORKER_TIMEOUT_SECONDS", 60.0)
     )
+    vlm_job_timeout_seconds: float = field(default_factory=lambda: _env_float("SAFETRACE_VLM_JOB_TIMEOUT_SECONDS", 0.0))
+    vlm_max_quality_failures: int = field(default_factory=lambda: _env_int("SAFETRACE_VLM_MAX_QUALITY_FAILURES", 1))
+    vlm_disable_after_timeout: bool = field(default_factory=lambda: _env_bool("SAFETRACE_VLM_DISABLE_AFTER_TIMEOUT", True))
 
     # ---- Runtime ----
     device: str = field(default_factory=lambda: _env("SAFETRACE_DEVICE", "auto"))
+    enable_gpu_auto: bool = field(default_factory=lambda: _env_bool("SAFETRACE_ENABLE_GPU_AUTO", True))
+    lightweight_vlm_device: str = field(default_factory=lambda: _env("SAFETRACE_LIGHTWEIGHT_VLM_DEVICE", "auto"))
+    enhanced_vlm_device: str = field(default_factory=lambda: _env("SAFETRACE_ENHANCED_VLM_DEVICE", "cuda"))
+    mobile_sam_device: str = field(default_factory=lambda: _env("SAFETRACE_MOBILESAM_DEVICE", "auto"))
     offline: bool = field(default_factory=lambda: _env_bool("SAFETRACE_OFFLINE", True))
     analysis_safe_mode: bool = field(default_factory=lambda: _env_bool("SAFETRACE_ANALYSIS_SAFE_MODE", False))
     safe_mode_allow_mobilesam: bool = field(
@@ -183,6 +228,10 @@ class Settings:
         default_factory=lambda: _env_float("SAFETRACE_MAX_VIDEO_SECONDS", 0.0)
     )
     worker_concurrency: int = field(default_factory=lambda: _env_int("SAFETRACE_WORKER_CONCURRENCY", 1))
+    analysis_concurrency: int = field(
+        default_factory=lambda: _env_int("SAFETRACE_ANALYSIS_CONCURRENCY", _env_int("SAFETRACE_WORKER_CONCURRENCY", 1))
+    )
+    vlm_concurrency: int = field(default_factory=lambda: _env_int("SAFETRACE_VLM_CONCURRENCY", 1))
 
     # ---- Local API hardening ----
     max_upload_mb: float = field(default_factory=lambda: _env_float("SAFETRACE_MAX_UPLOAD_MB", 512.0))

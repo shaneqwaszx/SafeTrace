@@ -4,6 +4,7 @@ export const RESULT_CACHE_VERSION = 1;
 const DB_NAME = 'safetrace-result-cache';
 const STORE_NAME = 'results';
 const LOCAL_STORAGE_VERSION_KEY = 'safetrace.resultCache.version';
+const RESULT_CACHE_STORAGE_PREFIXES = ['safetrace.resultCache', 'safetrace:resultCache'];
 const MAX_CACHE_ENTRY_BYTES = 2_500_000;
 const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -178,5 +179,20 @@ export async function deleteCachedResult(cacheKey: string): Promise<void> {
 export async function clearCachedResults(): Promise<void> {
   if (!('indexedDB' in window)) return;
   await withStore('readwrite', (store) => store.clear());
-  localStorage.setItem(LOCAL_STORAGE_VERSION_KEY, String(RESULT_CACHE_VERSION));
+  clearSafeTraceResultCacheStorageKeys();
+}
+
+export function clearSafeTraceResultCacheStorageKeys(): void {
+  [window.localStorage, window.sessionStorage].forEach((storage) => {
+    try {
+      for (let index = storage.length - 1; index >= 0; index -= 1) {
+        const key = storage.key(index);
+        if (key && RESULT_CACHE_STORAGE_PREFIXES.some((prefix) => key.startsWith(prefix))) {
+          storage.removeItem(key);
+        }
+      }
+    } catch {
+      // Cache cleanup remains best-effort when browser storage is restricted.
+    }
+  });
 }

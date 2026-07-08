@@ -412,6 +412,9 @@ def _provider_model_name(provider: str) -> Optional[str]:
 
 
 def _display_model_path(path: Path) -> str:
+    configured_path = Path(getattr(SETTINGS, "chat_model_path", DEFAULT_PACKAGED_MODEL_PATH))
+    if configured_path.is_absolute():
+        return str(path)
     try:
         return str(path.relative_to(SETTINGS.project_root))
     except ValueError:

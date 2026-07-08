@@ -1,5 +1,7 @@
 import { LoaderCircle, SendHorizontal, RotateCcw } from 'lucide-react';
 import type { FormEvent } from 'react';
+import type { UseCaseProfileSelection } from '../types/analysis';
+import { supportLevelLabel } from '../data/useCaseProfiles';
 
 type QueryTabsProps = {
   query: string;
@@ -7,6 +9,10 @@ type QueryTabsProps = {
   hasResult: boolean;
   canAnalyze: boolean;
   disabledReason?: string;
+  useCaseProfile?: UseCaseProfileSelection;
+  effectiveQuery?: string;
+  queryConflict?: string | null;
+  buttonLabel?: string;
   previewMode?: boolean;
   onQueryChange: (query: string) => void;
   onAnalyze: () => void;
@@ -14,10 +20,10 @@ type QueryTabsProps = {
 };
 
 const QUERY_EXAMPLES = [
+  'driver without seatbelt',
+  'driver using phone while driving',
   'worker without helmet',
   'person near machinery',
-  'someone falling',
-  'damaged equipment',
 ];
 
 export function QueryTabs({
@@ -26,6 +32,10 @@ export function QueryTabs({
   hasResult,
   canAnalyze,
   disabledReason,
+  useCaseProfile,
+  effectiveQuery,
+  queryConflict,
+  buttonLabel = 'Send',
   previewMode = false,
   onQueryChange,
   onAnalyze,
@@ -42,7 +52,7 @@ export function QueryTabs({
           <div className="relative min-w-0 flex-1">
             <div className="mb-3 flex flex-wrap items-center gap-2">
               <label className="block text-sm font-semibold text-slate-950" htmlFor="tab-query">
-                Enter Query
+                Profile query refinement
               </label>
               {previewMode ? (
                 <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-bold uppercase text-amber-700">
@@ -55,15 +65,32 @@ export function QueryTabs({
               className="focus-ring h-12 w-full rounded-lg border border-slate-200 bg-slate-50 px-4 text-base text-slate-950 placeholder:text-slate-400 focus:bg-white"
               value={query}
               onChange={(e) => onQueryChange(e.target.value)}
-              placeholder="Ask me to analyze the scene..."
+              placeholder={useCaseProfile?.defaultQuery ?? 'Ask me to analyze the scene...'}
             />
+            {useCaseProfile ? (
+              <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-600">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold text-slate-900">{useCaseProfile.label}</span>
+                  <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 font-semibold uppercase text-slate-500">
+                    {supportLevelLabel(useCaseProfile.backendSupportLevel)}
+                  </span>
+                </div>
+                <p className="mt-1">Default query: <span className="font-semibold text-slate-800">{useCaseProfile.defaultQuery}</span></p>
+                {effectiveQuery ? (
+                  <p className="mt-1">Effective query sent: <span className="font-semibold text-slate-800">{effectiveQuery}</span></p>
+                ) : null}
+                {useCaseProfile.limitations ? (
+                  <p className="mt-1 text-amber-800">{useCaseProfile.limitations}</p>
+                ) : null}
+              </div>
+            ) : null}
           </div>
 
           <div className="flex gap-2">
             <button
               className="focus-ring inline-flex h-12 items-center justify-center gap-2 rounded-lg bg-safety-blue px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:opacity-50"
               type="submit"
-              disabled={isLoading || !canAnalyze}
+              disabled={!canAnalyze}
               title={!canAnalyze ? disabledReason : undefined}
             >
               {isLoading ? (
@@ -71,7 +98,7 @@ export function QueryTabs({
               ) : (
                 <SendHorizontal className="h-4 w-4" />
               )}
-              {isLoading ? 'Thinking...' : 'Send'}
+              {isLoading ? 'Running' : buttonLabel}
             </button>
             
             <button
@@ -88,6 +115,11 @@ export function QueryTabs({
         {!canAnalyze && disabledReason ? (
           <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
             {disabledReason}
+          </p>
+        ) : null}
+        {queryConflict ? (
+          <p className="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-800">
+            Resolve the profile/query conflict before analysis starts.
           </p>
         ) : null}
 

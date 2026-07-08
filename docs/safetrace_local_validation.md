@@ -4,6 +4,53 @@ Use this checklist before building another package.
 
 ## Start Local Runtime
 
+For source-development validation of chat and Lightweight VLM worker behavior,
+prefer the helper script:
+
+```cmd
+scripts\start_safetrace_dev_backend.bat
+```
+
+The helper starts from the repository root, prefers `.venv\Scripts\python.exe`,
+sets CPU Safe Mode with MobileSAM disabled, enables the local Lightweight VLM
+worker, configures packaged llama.cpp chat, checks whether `llama_cpp` imports
+in that Python, then starts FastAPI on `127.0.0.1:8000`. If `.venv` is missing,
+it warns before falling back to system Python. If `llama_cpp` is missing, it
+prints the install command for the selected interpreter, normally:
+`.venv\Scripts\python.exe -m pip install llama-cpp-python`.
+
+The helper sets `SAFETRACE_VLM_FRAME_LIMIT=5`, keeps
+`SAFETRACE_VLM_MAX_EVIDENCE_FRAMES=5` for compatibility, and sets
+`SAFETRACE_VLM_JOB_TIMEOUT_SECONDS=0`. Lightweight VLM remains optional and
+watchdog-protected: it is attempted only on eligible selected evidence frames up
+to the frame limit. Lower-priority cards should use readable copy such as local
+visual review not run for this frame, while raw reasons like
+`visual_review_frame_limit_reached`, `no_eligible_violation`, worker timeout, or
+quality rejection remain in technical evidence. A mixed result with VLM
+assistance on some frames and Fast Local Analysis on others is expected when
+only some frames produce accepted, safety-relevant VLM output.
+
+The packaged tester runtime is different: use the generated
+`SafeTraceLauncher.bat` inside a release package when validating packaged
+Safe Mode, supervisor restart behavior, and packaged asset resolution.
+
+Starting the source backend manually with plain `python -m uvicorn` can make
+`/api/system/status` report `runtime_layout=source`, a system Python such as
+`C:\Python312\python.exe`, missing `.venv`, missing `llama_cpp`, Lightweight VLM
+selected but `lightweightVlmWorkerEnabled=false`, and
+`lightweightVlmExplanationSource=rule_based`. That state is useful diagnostics,
+but it is not the intended local development profile for validating VLM/chat.
+For Lightweight VLM worker validation, `/api/system/status` should instead show
+`safeMode=true`, `device=cpu`, and `lightweightVlmWorkerEnabled=true`.
+
+The helper also checks core backend imports before starting uvicorn. If
+installing `llama-cpp-python` pulls NumPy 2.x into `.venv`, FAISS may fail with
+`numpy.core.multiarray failed to import`. Repair the local dev environment with:
+
+```cmd
+.venv\Scripts\python.exe -m pip install "numpy<2"
+```
+
 Backend:
 
 ```cmd

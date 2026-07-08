@@ -1,4 +1,4 @@
-import type { FrameResult } from '../types/analysis';
+import type { FrameResult, UseCaseProfileSelection } from '../types/analysis';
 import { FrameEvidenceCard } from './FrameEvidenceCard';
 
 type EvidenceFramesProps = {
@@ -6,9 +6,20 @@ type EvidenceFramesProps = {
   showExplanations: boolean;
   highlightedFrameId?: string | null;
   jobId?: string | null;
+  useCaseProfile?: UseCaseProfileSelection;
+  effectiveQuery?: string;
+  analysisDiagnostics?: Record<string, unknown> | null;
 };
 
-export function EvidenceFrames({ frames, showExplanations, highlightedFrameId, jobId }: EvidenceFramesProps) {
+export function EvidenceFrames({
+  frames,
+  showExplanations,
+  highlightedFrameId,
+  jobId,
+  useCaseProfile,
+  effectiveQuery,
+  analysisDiagnostics,
+}: EvidenceFramesProps) {
   return (
     <section id="evidence-frames">
       <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
@@ -34,6 +45,9 @@ export function EvidenceFrames({ frames, showExplanations, highlightedFrameId, j
             showExplanation={showExplanations}
             isHighlighted={frame.id === highlightedFrameId}
             jobId={jobId}
+            useCaseProfile={useCaseProfile}
+            effectiveQuery={effectiveQuery}
+            analysisDiagnostics={analysisDiagnostics}
           />
         ))}
       </div>

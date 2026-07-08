@@ -10,7 +10,7 @@ DeviceMode = Literal["auto", "cpu", "cuda"]
 JobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 BatchStatus = Literal["queued", "running", "completed", "failed", "partial", "cancelled"]
 ChatAvailabilityState = Literal["available", "disabled", "missing_model", "missing_runtime", "loading", "unavailable"]
-VlmProfileId = Literal["rule_based", "lightweight_256m", "enhanced_2b"]
+VlmProfileId = Literal["rule_based", "lightweight_256m", "lightweight_512m", "enhanced_2b", "enhanced_3b"]
 
 
 class HealthResponse(BaseModel):
@@ -37,6 +37,14 @@ class VlmProfileStatus(BaseModel):
     resourceLevel: str
     path: Optional[str] = None
     message: Optional[str] = None
+    statusCopy: Optional[str] = None
+    deprecated: bool = False
+    notViable: bool = False
+    candidate: bool = False
+    legacy: bool = False
+    fallback: bool = False
+    requiresGpu: bool = False
+    deviceDecision: Optional[Dict[str, Any]] = None
 
 
 class VlmSystemStatus(BaseModel):
@@ -57,6 +65,15 @@ class VlmSystemStatus(BaseModel):
     lightweightVlmWorkerEnabled: Optional[bool] = None
     lightweightVlmWorkerTimeoutSeconds: Optional[float] = None
     lightweightVlmExplanationSource: Optional[str] = None
+    lightweightVlmEvidenceBudget: Optional[int] = None
+    lightweightVlmFrameLimit: Optional[int] = None
+    lightweightVlmJobTimeoutSeconds: Optional[float] = None
+    lightweightVlmMaxQualityFailures: Optional[int] = None
+    lightweightVlmPrimaryPolicy: Optional[str] = None
+    lightweightVlmFallbackPolicy: Optional[str] = None
+    lightweightVlmCpuPrefer256m: Optional[bool] = None
+    enhancedVlmRequiresGpu: Optional[bool] = None
+    deviceGateway: Optional[Dict[str, Any]] = None
 
 
 class SystemStatusResponse(BaseModel):
@@ -158,6 +175,7 @@ class BatchResponse(BaseModel):
     statusCounts: Dict[str, int]
     createdAt: str
     updatedAt: str
+    persistenceWarning: Optional[str] = None
 
 
 class JobStatusResponse(BaseModel):
@@ -172,9 +190,19 @@ class JobStatusResponse(BaseModel):
     metrics: Optional[Dict[str, Any]] = None
     componentDiagnostics: Optional[Dict[str, Any]] = None
     updatedAt: Optional[str] = None
+    createdAt: Optional[str] = None
+    queuedAt: Optional[str] = None
     startedAt: Optional[str] = None
     finishedAt: Optional[str] = None
+    completedAt: Optional[str] = None
+    failedAt: Optional[str] = None
+    cancelledAt: Optional[str] = None
+    elapsedSeconds: Optional[float] = None
+    queueWaitSeconds: Optional[float] = None
+    analysisRuntimeSeconds: Optional[float] = None
     heartbeatAt: Optional[str] = None
+    persistenceWarning: Optional[str] = None
+    manifestPersistenceWarning: Optional[str] = None
 
 
 class MediaSummary(BaseModel):
@@ -253,7 +281,7 @@ class FrameResult(BaseModel):
     status: Literal["violations_detected", "no_violations"]
     imageUrl: Optional[str] = None
     imageMessage: Optional[str] = None
-    explanationSource: Optional[Literal["vlm", "vlm_local", "vlm_ollama", "vlm_lightweight", "vlm_enhanced", "rule_based"]] = None
+    explanationSource: Optional[Literal["vlm", "vlm_local", "vlm_ollama", "vlm_lightweight", "vlm_enhanced", "rule_template_plus_vlm", "rule_template_plus_lightweight_vlm", "rule_template_plus_lightweight_plus_enhanced", "rule_based"]] = None
     violations: List[FrameViolation]
     technicalEvidence: Dict[str, Any]
 
@@ -261,10 +289,19 @@ class FrameResult(BaseModel):
 class AnalysisResultResponse(BaseModel):
     jobId: str
     status: Literal["completed"]
+    createdAt: Optional[str] = None
+    queuedAt: Optional[str] = None
+    startedAt: Optional[str] = None
+    finishedAt: Optional[str] = None
+    completedAt: Optional[str] = None
+    elapsedSeconds: Optional[float] = None
+    queueWaitSeconds: Optional[float] = None
+    analysisRuntimeSeconds: Optional[float] = None
     media: MediaSummary
     query: str
     summary: AnalysisSummary
     violations: List[GroupedViolation]
     events: Optional[List[ViolationEvent]] = None
     frames: List[FrameResult]
+    engineMetrics: Optional[Dict[str, Any]] = None
     technicalDetails: Optional[Dict[str, Any]] = None

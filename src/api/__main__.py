@@ -78,8 +78,16 @@ def apply_packaged_defaults(app_root: Path) -> None:
         str(app_root / "models" / "vlm" / "lightweight-256m"),
     )
     os.environ.setdefault(
+        "SAFETRACE_VLM_LIGHTWEIGHT_512M_MODEL_PATH",
+        str(app_root / "models" / "vlm" / "lightweight-512m"),
+    )
+    os.environ.setdefault(
         "SAFETRACE_VLM_ENHANCED_MODEL_PATH",
         str(app_root / "models" / "vlm" / "enhanced-2b"),
+    )
+    os.environ.setdefault(
+        "SAFETRACE_VLM_ENHANCED_3B_MODEL_PATH",
+        str(app_root / "models" / "vlm" / "enhanced-3b"),
     )
     os.environ.setdefault("SAFETRACE_VLM_OLLAMA_BASE_URL", "http://127.0.0.1:11434")
     os.environ.setdefault("SAFETRACE_VLM_MODEL", "local-vlm")

@@ -10,6 +10,9 @@ dist/backend/
 *.exe
 *.spec-generated
 frontend-react/dist/
+tmp_vlm_eval/
+tmp_vlm_profile_eval/
+tmp_backend_benchmark/
 
 # Data / models / outputs
 dist/SafeTrace/

@@ -14,9 +14,11 @@ function getStatusTone(status: MediaItem['status']) {
     return 'success';
   }
 
-  if (status === 'processing') {
+  if (status === 'processing' || status === 'queued') {
     return 'info';
   }
+
+  if (status === 'draft') return 'neutral';
 
   return 'danger';
 }

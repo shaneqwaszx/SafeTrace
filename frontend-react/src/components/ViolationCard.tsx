@@ -75,7 +75,7 @@ export function ViolationCard({ violation, onFrameSelect }: ViolationCardProps) 
         </div>
 
         <div className="rounded-lg bg-slate-50 p-3">
-          <p className="text-xs font-semibold uppercase text-slate-500">Confidence</p>
+          <p className="text-xs font-semibold uppercase text-slate-500">Evidence strength</p>
           <p className="mt-2 text-sm font-semibold text-slate-950">
             {typeof violation.representativeConfidence === 'number'
               ? formatConfidence(violation.representativeConfidence)

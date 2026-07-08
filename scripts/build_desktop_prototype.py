@@ -34,10 +34,15 @@ DEFAULT_CHAT_MODEL_NAME = "safetrace-assistant-qwen2.5-1.5b-instruct-q4.gguf"
 VLM_SOURCE_DIR = Path("models") / "vlm"
 VLM_PACKAGE_DIR = Path("models") / "vlm"
 VLM_LIGHTWEIGHT_PROFILE = "lightweight-256m"
+VLM_LIGHTWEIGHT_512M_PROFILE = "lightweight-512m"
 VLM_ENHANCED_PROFILE = "enhanced-2b"
+VLM_ENHANCED_3B_PROFILE = "enhanced-3b"
 VLM_LIGHTWEIGHT_SOURCE_DIR = VLM_SOURCE_DIR / VLM_LIGHTWEIGHT_PROFILE
+VLM_LIGHTWEIGHT_512M_SOURCE_DIR = VLM_SOURCE_DIR / VLM_LIGHTWEIGHT_512M_PROFILE
 VLM_LIGHTWEIGHT_PACKAGE_DIR = VLM_PACKAGE_DIR / VLM_LIGHTWEIGHT_PROFILE
+VLM_LIGHTWEIGHT_512M_PACKAGE_DIR = VLM_PACKAGE_DIR / VLM_LIGHTWEIGHT_512M_PROFILE
 VLM_ENHANCED_PACKAGE_DIR = VLM_PACKAGE_DIR / VLM_ENHANCED_PROFILE
+VLM_ENHANCED_3B_PACKAGE_DIR = VLM_PACKAGE_DIR / VLM_ENHANCED_3B_PROFILE
 CONFIG_SOURCE = Path("config") / "safetrace.env"
 CONFIG_EXAMPLE_SOURCE = Path("config") / "safetrace.env.example"
 OPTIONAL_ASSETS_REPORT = "OPTIONAL_ASSETS_REPORT.txt"
@@ -62,6 +67,8 @@ PROTECTED_ASSET_RULES = [
     "!dist/SafeTrace/checkpoints/mobile_sam.pt",
     "!dist/SafeTrace/models/chat/*.gguf",
     "!dist/SafeTrace/models/vlm/lightweight-256m/**",
+    "!dist/SafeTrace/models/vlm/lightweight-512m/**",
+    "!dist/SafeTrace/models/vlm/enhanced-3b/**",
 ]
 PACKAGE_ASSET_ALLOWLIST = [
     "dist/SafeTrace/checkpoints/siglip-base-patch16-224/**",
@@ -70,6 +77,8 @@ PACKAGE_ASSET_ALLOWLIST = [
     "dist/SafeTrace/checkpoints/mobile_sam.pt",
     "dist/SafeTrace/models/chat/*.gguf",
     "dist/SafeTrace/models/vlm/lightweight-256m/**",
+    "dist/SafeTrace/models/vlm/lightweight-512m/**",
+    "dist/SafeTrace/models/vlm/enhanced-3b/**",
 ]
 PRESERVE_PATHS = ["config/", "data/", "models/", "logs/", "checkpoints/"]
 MAIN_RELEASE_PROFILE_NAME = "SafeTrace_RC_SafeMode_RuleBased"
@@ -95,12 +104,19 @@ PACKAGE_ENV_DEFAULTS = {
     "SAFETRACE_VLM_MODEL_PATH": "models/vlm",
     "SAFETRACE_VLM_DIR": "models/vlm",
     "SAFETRACE_VLM_LIGHTWEIGHT_MODEL_PATH": "models/vlm/lightweight-256m",
+    "SAFETRACE_VLM_LIGHTWEIGHT_512M_MODEL_PATH": "models/vlm/lightweight-512m",
     "SAFETRACE_VLM_ENHANCED_MODEL_PATH": "models/vlm/enhanced-2b",
+    "SAFETRACE_VLM_ENHANCED_3B_MODEL_PATH": "models/vlm/enhanced-3b",
     "SAFETRACE_VLM_OLLAMA_BASE_URL": "http://127.0.0.1:11434",
     "SAFETRACE_VLM_MODEL": "local-vlm",
     "SAFETRACE_VLM_TIMEOUT_SECONDS": "10",
-    "SAFETRACE_VLM_MAX_FRAMES": "1",
-    "SAFETRACE_VLM_MAX_TOKENS": "180",
+    "SAFETRACE_VLM_MAX_FRAMES": "5",
+    "SAFETRACE_VLM_FRAME_LIMIT": "5",
+    "SAFETRACE_VLM_MAX_EVIDENCE_FRAMES": "5",
+    "SAFETRACE_VLM_JOB_TIMEOUT_SECONDS": "0",
+    "SAFETRACE_VLM_MAX_QUALITY_FAILURES": "1",
+    "SAFETRACE_VLM_DISABLE_AFTER_TIMEOUT": "true",
+    "SAFETRACE_VLM_MAX_TOKENS": "40",
     "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED": "false",
     "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_TIMEOUT_SECONDS": "60",
     "SAFETRACE_CHAT_ENABLED": "auto",
@@ -210,7 +226,12 @@ PACKAGE_RELEASE_PROFILES = {
             "SAFETRACE_VLM_ENABLED": "auto",
             "SAFETRACE_VLM_PROVIDER": "auto",
             "SAFETRACE_VLM_PROFILE": "lightweight_256m",
-            "SAFETRACE_VLM_MAX_FRAMES": "1",
+            "SAFETRACE_VLM_MAX_FRAMES": "5",
+            "SAFETRACE_VLM_FRAME_LIMIT": "5",
+            "SAFETRACE_VLM_MAX_EVIDENCE_FRAMES": "5",
+            "SAFETRACE_VLM_JOB_TIMEOUT_SECONDS": "0",
+            "SAFETRACE_VLM_MAX_QUALITY_FAILURES": "1",
+            "SAFETRACE_VLM_MAX_TOKENS": "40",
             "SAFETRACE_CHAT_ENABLED": "auto",
             "SAFETRACE_CHAT_PROVIDER": "packaged_llamacpp",
         },
@@ -237,8 +258,12 @@ PACKAGE_RELEASE_PROFILES = {
             "SAFETRACE_VLM_DIR": "models/vlm",
             "SAFETRACE_VLM_LIGHTWEIGHT_MODEL_PATH": "models/vlm/lightweight-256m",
             "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED": "true",
-            "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_TIMEOUT_SECONDS": "120",
-            "SAFETRACE_VLM_MAX_FRAMES": "1",
+            "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_TIMEOUT_SECONDS": "60",
+            "SAFETRACE_VLM_MAX_FRAMES": "5",
+            "SAFETRACE_VLM_FRAME_LIMIT": "5",
+            "SAFETRACE_VLM_MAX_EVIDENCE_FRAMES": "5",
+            "SAFETRACE_VLM_JOB_TIMEOUT_SECONDS": "0",
+            "SAFETRACE_VLM_MAX_QUALITY_FAILURES": "1",
             "SAFETRACE_VLM_MAX_TOKENS": "64",
             "SAFETRACE_CHAT_ENABLED": "auto",
             "SAFETRACE_CHAT_PROVIDER": "packaged_llamacpp",
@@ -251,6 +276,87 @@ PACKAGE_RELEASE_PROFILES = {
             "SigLIP/FAISS remain skipped in Safe Mode and neither worker controls frame discovery.",
             "Rule-based fallback remains active if either worker fails, times out, exits non-zero, or returns invalid JSON.",
             "Enhanced VLM assets are intentionally excluded.",
+        ],
+    },
+    "SafeTrace_RC_Lightweight512M_VLM_Experimental": {
+        "description": "Selected-tester lightweight VLM candidate package profile. Rule-based fallback remains active and only the 512M candidate VLM tier should be included.",
+        "env": {
+            "SAFETRACE_ANALYSIS_SAFE_MODE": "true",
+            "SAFETRACE_DEVICE": "cpu",
+            "SAFETRACE_MOBILESAM_ENABLED": "false",
+            "SAFETRACE_VLM_ENABLED": "true",
+            "SAFETRACE_VLM_PROVIDER": "auto",
+            "SAFETRACE_VLM_PROFILE": "lightweight_512m",
+            "SAFETRACE_VLM_MODEL_PATH": "models/vlm/lightweight-512m",
+            "SAFETRACE_VLM_DIR": "models/vlm",
+            "SAFETRACE_VLM_LIGHTWEIGHT_512M_MODEL_PATH": "models/vlm/lightweight-512m",
+            "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED": "true",
+            "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_TIMEOUT_SECONDS": "60",
+            "SAFETRACE_VLM_FRAME_LIMIT": "5",
+            "SAFETRACE_VLM_MAX_EVIDENCE_FRAMES": "5",
+            "SAFETRACE_VLM_JOB_TIMEOUT_SECONDS": "0",
+            "SAFETRACE_VLM_MAX_QUALITY_FAILURES": "1",
+            "SAFETRACE_CHAT_ENABLED": "auto",
+            "SAFETRACE_CHAT_PROVIDER": "packaged_llamacpp",
+            "SAFETRACE_BUILD_MODE": "SafeTrace_RC_Lightweight512M_VLM_Experimental",
+            "SAFETRACE_RUNTIME_LAYOUT": "packaged-lightweight-512m-vlm-experimental",
+        },
+        "notes": [
+            "Selected testers only; candidate must pass labelled VLM validation before release.",
+            "Package this profile with rule-based fallback and lightweight-512m only.",
+            "Do not include enhanced-3b or the legacy enhanced profile in this package.",
+        ],
+    },
+    "SafeTrace_Internal_Enhanced3B_VLM_Experimental": {
+        "description": "Internal enhanced VLM replacement candidate profile. Rule-based fallback remains active and only the 3B enhanced tier should be included.",
+        "env": {
+            "SAFETRACE_ANALYSIS_SAFE_MODE": "false",
+            "SAFETRACE_DEVICE": "cpu",
+            "SAFETRACE_MOBILESAM_ENABLED": "false",
+            "SAFETRACE_VLM_ENABLED": "true",
+            "SAFETRACE_VLM_PROVIDER": "auto",
+            "SAFETRACE_VLM_PROFILE": "enhanced_3b",
+            "SAFETRACE_VLM_MODEL_PATH": "models/vlm/enhanced-3b",
+            "SAFETRACE_VLM_DIR": "models/vlm",
+            "SAFETRACE_VLM_ENHANCED_3B_MODEL_PATH": "models/vlm/enhanced-3b",
+            "SAFETRACE_VLM_FRAME_LIMIT": "5",
+            "SAFETRACE_VLM_MAX_EVIDENCE_FRAMES": "5",
+            "SAFETRACE_VLM_JOB_TIMEOUT_SECONDS": "0",
+            "SAFETRACE_VLM_MAX_QUALITY_FAILURES": "1",
+            "SAFETRACE_CHAT_ENABLED": "auto",
+            "SAFETRACE_CHAT_PROVIDER": "packaged_llamacpp",
+            "SAFETRACE_BUILD_MODE": "SafeTrace_Internal_Enhanced3B_VLM_Experimental",
+            "SAFETRACE_RUNTIME_LAYOUT": "packaged-enhanced-3b-vlm-internal",
+        },
+        "notes": [
+            "Internal evaluation only; do not send to general testers.",
+            "Package this profile with rule-based fallback and enhanced-3b only.",
+            "Do not include lightweight-512m unless a separate full internal lab build is requested.",
+        ],
+    },
+    "SafeTrace_Internal_Lab_AllModels": {
+        "description": "Internal lab profile for comparing rule-based, 512M, 3B, chatbot, and MobileSAM assets. Not for general testers.",
+        "env": {
+            "SAFETRACE_ANALYSIS_SAFE_MODE": "true",
+            "SAFETRACE_SAFE_MODE_ALLOW_MOBILESAM": "true",
+            "SAFETRACE_DEVICE": "cpu",
+            "SAFETRACE_MOBILESAM_ENABLED": "true",
+            "SAFETRACE_MOBILESAM_WORKER_ENABLED": "true",
+            "SAFETRACE_VLM_ENABLED": "true",
+            "SAFETRACE_VLM_PROVIDER": "auto",
+            "SAFETRACE_VLM_PROFILE": "lightweight_512m",
+            "SAFETRACE_VLM_LIGHTWEIGHT_512M_MODEL_PATH": "models/vlm/lightweight-512m",
+            "SAFETRACE_VLM_ENHANCED_3B_MODEL_PATH": "models/vlm/enhanced-3b",
+            "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED": "true",
+            "SAFETRACE_CHAT_ENABLED": "auto",
+            "SAFETRACE_CHAT_PROVIDER": "packaged_llamacpp",
+            "SAFETRACE_BUILD_MODE": "SafeTrace_Internal_Lab_AllModels",
+            "SAFETRACE_RUNTIME_LAYOUT": "packaged-internal-lab-all-models",
+        },
+        "notes": [
+            "Internal lab only; not a general tester package.",
+            "May include 512M, 3B, chatbot, and MobileSAM for controlled comparison.",
+            "Do not use this as the default packaging profile.",
         ],
     },
 }
@@ -318,7 +424,9 @@ if not defined SAFETRACE_VLM_PROFILE set "SAFETRACE_VLM_PROFILE=rule_based"
 if not defined SAFETRACE_VLM_MODEL_PATH set "SAFETRACE_VLM_MODEL_PATH=%APP_ROOT%\models\vlm"
 if not defined SAFETRACE_VLM_DIR set "SAFETRACE_VLM_DIR=%SAFETRACE_VLM_MODEL_PATH%"
 if not defined SAFETRACE_VLM_LIGHTWEIGHT_MODEL_PATH set "SAFETRACE_VLM_LIGHTWEIGHT_MODEL_PATH=%APP_ROOT%\models\vlm\lightweight-256m"
+if not defined SAFETRACE_VLM_LIGHTWEIGHT_512M_MODEL_PATH set "SAFETRACE_VLM_LIGHTWEIGHT_512M_MODEL_PATH=%APP_ROOT%\models\vlm\lightweight-512m"
 if not defined SAFETRACE_VLM_ENHANCED_MODEL_PATH set "SAFETRACE_VLM_ENHANCED_MODEL_PATH=%APP_ROOT%\models\vlm\enhanced-2b"
+if not defined SAFETRACE_VLM_ENHANCED_3B_MODEL_PATH set "SAFETRACE_VLM_ENHANCED_3B_MODEL_PATH=%APP_ROOT%\models\vlm\enhanced-3b"
 if not defined SAFETRACE_VLM_OLLAMA_BASE_URL set "SAFETRACE_VLM_OLLAMA_BASE_URL=http://127.0.0.1:11434"
 if not defined SAFETRACE_VLM_MODEL set "SAFETRACE_VLM_MODEL=local-vlm"
 if not defined SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED set "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED=false"
@@ -561,6 +669,13 @@ def package_root(repo_root: Path, output_dir: Path | None = None) -> Path:
 
 def manifest_payload(*, release_profile: str = MAIN_RELEASE_PROFILE_NAME) -> dict:
     profile = PACKAGE_RELEASE_PROFILES[release_profile]
+    values = package_env_values(release_profile=release_profile)
+    vlm_package_dir = vlm_asset_package_dir_for_values(values)
+    vlm_assets = (
+        str(vlm_package_dir).replace("\\", "/") + "/"
+        if release_vlm_expected(values)
+        else None
+    )
     return {
         "component": "safetrace-desktop-package",
         "version": "0.0.0-dev",
@@ -575,7 +690,7 @@ def manifest_payload(*, release_profile: str = MAIN_RELEASE_PROFILE_NAME) -> dic
             "primaryDetector": "checkpoints/yolov9c-seg.pt",
             "mobileSamCheckpoint": "checkpoints/mobile_sam.pt",
             "chatModel": f"models/chat/{DEFAULT_CHAT_MODEL_NAME}",
-            "vlmAssets": "models/vlm/lightweight-256m/",
+            "vlmAssets": vlm_assets,
             "config": "config/safetrace.env",
             "data": "data/",
             "logs": "logs/",
@@ -596,7 +711,7 @@ def manifest_payload(*, release_profile: str = MAIN_RELEASE_PROFILE_NAME) -> dic
             "primaryDetector": str(PRIMARY_DETECTOR_PACKAGE_PATH).replace("\\", "/"),
             "mobileSam": str(MOBILE_SAM_PACKAGE_PATH).replace("\\", "/"),
             "chat": str(CHAT_MODEL_PACKAGE_DIR / DEFAULT_CHAT_MODEL_NAME).replace("\\", "/"),
-            "vlm": str(VLM_LIGHTWEIGHT_PACKAGE_DIR).replace("\\", "/") + "/",
+            "vlm": vlm_assets,
             "enhancedVlmPackaged": False,
             "ollamaRequired": False,
         },
@@ -711,6 +826,22 @@ def release_vlm_expected(values: dict[str, str]) -> bool:
     return provider in {"", "auto", "local", "legacy", "existing", "transformers", "local_transformers", "local_dir"}
 
 
+def vlm_asset_source_for_values(values: dict[str, str]) -> Path:
+    profile = values.get("SAFETRACE_VLM_PROFILE", "rule_based").strip().lower()
+    if profile == "lightweight_512m":
+        return VLM_LIGHTWEIGHT_512M_SOURCE_DIR
+    if profile == "enhanced_3b":
+        return VLM_SOURCE_DIR / VLM_ENHANCED_3B_PROFILE
+    if profile == "enhanced_2b":
+        return VLM_SOURCE_DIR / VLM_ENHANCED_PROFILE
+    return VLM_LIGHTWEIGHT_SOURCE_DIR
+
+
+def vlm_asset_package_dir_for_values(values: dict[str, str]) -> Path:
+    source = vlm_asset_source_for_values(values)
+    return VLM_PACKAGE_DIR / source.name
+
+
 def source_backend_exe(repo_root: Path, backend_exe: Path | None = None) -> Path:
     source = backend_exe or repo_root / DEFAULT_BACKEND_EXE
     return source if source.is_absolute() else repo_root / source
@@ -743,8 +874,10 @@ def strict_asset_failures(
         failures.append("MobileSAM checkpoint missing at checkpoints/mobile_sam.pt.")
     if release_chat_expected(values) and not chat_model_sources(repo_root):
         failures.append("Packaged chat model missing under models/chat/*.gguf.")
-    if release_vlm_expected(values) and not path_has_contents(repo_root / VLM_LIGHTWEIGHT_SOURCE_DIR):
-        failures.append("Lightweight local VLM assets missing under models/vlm/lightweight-256m/.")
+    if release_vlm_expected(values):
+        vlm_source = vlm_asset_source_for_values(values)
+        if not path_has_contents(repo_root / vlm_source):
+            failures.append(f"Selected VLM assets missing under {vlm_source.as_posix()}/.")
     return failures
 
 
@@ -1011,26 +1144,53 @@ def copy_chat_models(repo_root: Path, package: Path, report: list[dict]) -> list
     return copied
 
 
-def copy_vlm_assets(repo_root: Path, package: Path, report: list[dict]) -> bool:
-    source = repo_root / VLM_LIGHTWEIGHT_SOURCE_DIR
-    target = package / VLM_LIGHTWEIGHT_PACKAGE_DIR
+def copy_vlm_assets(
+    repo_root: Path,
+    package: Path,
+    report: list[dict],
+    *,
+    release_profile: str = MAIN_RELEASE_PROFILE_NAME,
+) -> dict[str, object]:
+    values = release_config_values(repo_root, release_profile=release_profile)
+    selected_profile = values.get("SAFETRACE_VLM_PROFILE", "rule_based").strip().lower()
+    summary: dict[str, object] = {
+        "vlm_assets_included": False,
+        "broad_vlm_assets_included": False,
+        "selected_vlm_profile": selected_profile if release_vlm_expected(values) else None,
+        "selected_vlm_assets_included": False,
+        "included_vlm_profiles": [],
+    }
     vlm_root = package / VLM_PACKAGE_DIR
-    enhanced_target = package / VLM_ENHANCED_PACKAGE_DIR
     vlm_root.mkdir(parents=True, exist_ok=True)
-    if enhanced_target.exists():
-        shutil.rmtree(enhanced_target)
+    if not release_vlm_expected(values):
+        write_text(vlm_root / "README.txt", VLM_README)
+        add_asset_report(
+            report,
+            name="VLM assets",
+            source=repo_root / VLM_SOURCE_DIR,
+            target=vlm_root,
+            status="skipped",
+            required_in_strict=False,
+            message="Selected release profile uses rule-based explanations and does not copy a VLM model tier.",
+        )
+        return summary
+
+    selected_source = vlm_asset_source_for_values(values)
+    selected_package_dir = vlm_asset_package_dir_for_values(values)
+    source = repo_root / selected_source
+    target = package / selected_package_dir
     if not path_has_contents(source):
         write_text(vlm_root / "README.txt", VLM_README)
         add_asset_report(
             report,
-            name="lightweight VLM assets",
+            name="VLM assets",
             source=source,
             target=target,
             status="missing",
             required_in_strict=False,
-            message="Lightweight local VLM assets missing; rule-based fallback remains available.",
+            message=f"Selected VLM assets missing for {values.get('SAFETRACE_VLM_PROFILE')}; rule-based fallback remains available.",
         )
-        return False
+        return summary
 
     if target.exists():
         shutil.rmtree(target)
@@ -1050,14 +1210,19 @@ def copy_vlm_assets(repo_root: Path, package: Path, report: list[dict]) -> bool:
     )
     add_asset_report(
         report,
-        name="lightweight VLM assets",
+        name="VLM assets",
         source=source,
         target=target,
         status="included",
         required_in_strict=False,
-        message="Optional lightweight local/non-Ollama VLM assets copied. VLM remains disabled by default and Enhanced VLM assets are excluded.",
+        message=(
+            f"Copied selected VLM asset tier {values.get('SAFETRACE_VLM_PROFILE')}. "
+            "Other VLM tiers are not copied by this release profile."
+        ),
     )
-    return True
+    summary["selected_vlm_assets_included"] = True
+    summary["included_vlm_profiles"] = [selected_source.name]
+    return summary
 
 
 def asset_report_text(summary: dict) -> str:
@@ -1165,7 +1330,9 @@ def build_prototype(
     )
     mobile_sam_checkpoint_included = copy_mobile_sam_checkpoint(repo_root, package, asset_report)
     chat_models_included = copy_chat_models(repo_root, package, asset_report)
-    vlm_assets_included = copy_vlm_assets(repo_root, package, asset_report)
+    vlm_asset_summary = copy_vlm_assets(repo_root, package, asset_report, release_profile=release_profile)
+    vlm_assets_included = bool(vlm_asset_summary.get("vlm_assets_included", False))
+    selected_vlm_assets_included = bool(vlm_asset_summary.get("selected_vlm_assets_included", False))
 
     warnings = [
         "Excluded local data, uploads, generated reports, generated media, and cache folders.",
@@ -1200,10 +1367,13 @@ def build_prototype(
         warnings.append(f"Packaged chat model included: {', '.join(chat_models_included)}.")
     else:
         warnings.append("Packaged chat model missing; assistant remains structured but unavailable.")
-    if vlm_assets_included:
-        warnings.append("Lightweight VLM assets included from models/vlm/lightweight-256m/.")
+    values = release_config_values(repo_root, release_profile=release_profile)
+    if selected_vlm_assets_included:
+        warnings.append(f"VLM assets included from {vlm_asset_source_for_values(values).as_posix()}/.")
+    elif release_vlm_expected(values):
+        warnings.append("Selected VLM assets missing; visual explanations use rule-based fallback.")
     else:
-        warnings.append("Lightweight VLM assets missing; visual explanations use rule-based fallback.")
+        warnings.append("VLM assets skipped for this rule-based release profile.")
 
     summary = {
         "package_root": str(package),
@@ -1219,6 +1389,10 @@ def build_prototype(
         "mobile_sam_checkpoint_included": mobile_sam_checkpoint_included,
         "chat_models_included": chat_models_included,
         "vlm_assets_included": vlm_assets_included,
+        "broad_vlm_assets_included": bool(vlm_asset_summary.get("broad_vlm_assets_included", False)),
+        "selected_vlm_profile": vlm_asset_summary.get("selected_vlm_profile"),
+        "selected_vlm_assets_included": selected_vlm_assets_included,
+        "included_vlm_profiles": list(vlm_asset_summary.get("included_vlm_profiles", [])),
         "preserve_paths": PRESERVE_PATHS,
         "excluded_asset_rules": PROTECTED_ASSET_RULES,
         "package_asset_allowlist": PACKAGE_ASSET_ALLOWLIST,
@@ -1246,7 +1420,9 @@ def print_summary(summary: dict) -> None:
     print(f"Primary detector included: {summary['primary_detector_included']}")
     print(f"MobileSAM checkpoint included: {summary['mobile_sam_checkpoint_included']}")
     print(f"Chat models included: {len(summary['chat_models_included'])}")
-    print(f"Lightweight VLM assets included: {summary['vlm_assets_included']}")
+    print(f"Broad VLM assets included: {summary['vlm_assets_included']}")
+    print(f"Selected VLM profile: {summary.get('selected_vlm_profile') or 'none'}")
+    print(f"Selected VLM assets included: {summary.get('selected_vlm_assets_included', False)}")
     print(f"Asset report: {summary['asset_report_path']}")
     print("Preserved external paths:")
     for path in summary["preserve_paths"]:
@@ -1285,7 +1461,7 @@ def print_dry_run(
     print(f"Would copy optional primary detector if present: {repo_root / PRIMARY_DETECTOR_SOURCE}")
     print(f"Would copy MobileSAM checkpoint if present: {repo_root / MOBILE_SAM_SOURCE}")
     print(f"Would copy chat GGUF models if present: {repo_root / CHAT_MODEL_SOURCE_DIR / CHAT_MODEL_PATTERN}")
-    print(f"Would copy lightweight local VLM assets if present: {repo_root / VLM_LIGHTWEIGHT_SOURCE_DIR}")
+    print(f"Would copy selected VLM assets if enabled: {repo_root / vlm_asset_source_for_values(values)}")
     print(f"Chat expected in strict mode: {release_chat_expected(values)}")
     print(f"Local VLM expected in strict mode: {release_vlm_expected(values)}")
     print("Would write package asset report: OPTIONAL_ASSETS_REPORT.txt")

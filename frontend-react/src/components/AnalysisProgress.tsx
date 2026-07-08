@@ -10,16 +10,77 @@ type AnalysisProgressProps = {
   stage?: string;
   message?: string;
   mode?: 'backend' | 'preview' | null;
+  status?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | string | null;
+  createdAt?: string | null;
+  queuedAt?: string | null;
   startedAt?: string | null;
+  completedAt?: string | null;
+  failedAt?: string | null;
+  cancelledAt?: string | null;
+  elapsedSeconds?: number | null;
+  queueWaitSeconds?: number | null;
+  analysisRuntimeSeconds?: number | null;
   updatedAt?: string | null;
   heartbeatAt?: string | null;
 };
 
-function formatElapsed(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
+function formatDurationSeconds(secondsValue: number): string {
+  const totalSeconds = Math.max(0, Math.floor(secondsValue));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function formatElapsed(ms: number): string {
+  return formatDurationSeconds(ms / 1000);
+}
+
+function elapsedStatusLabel(status: AnalysisProgressProps['status'] | undefined | null) {
+  if (status === 'queued') return 'Queued for';
+  if (status === 'completed') return 'Completed in';
+  if (status === 'failed') return 'Failed after';
+  if (status === 'cancelled') return 'Cancelled after';
+  return 'Running for';
+}
+
+function elapsedFromServerSeconds({
+  status,
+  elapsedSeconds,
+  createdAt,
+  queuedAt,
+  startedAt,
+  completedAt,
+  failedAt,
+  cancelledAt,
+  now,
+}: {
+  status?: AnalysisProgressProps['status'];
+  elapsedSeconds?: number | null;
+  createdAt?: string | null;
+  queuedAt?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  failedAt?: string | null;
+  cancelledAt?: string | null;
+  now: number;
+}): number | null {
+  const terminal = status === 'completed' || status === 'failed' || status === 'cancelled';
+  if (terminal && typeof elapsedSeconds === 'number') return elapsedSeconds;
+  const start = parseTime(createdAt) ?? parseTime(queuedAt) ?? parseTime(startedAt);
+  if (!start) return typeof elapsedSeconds === 'number' ? elapsedSeconds : null;
+  const end = status === 'completed'
+    ? parseTime(completedAt)
+    : status === 'failed'
+      ? parseTime(failedAt)
+      : status === 'cancelled'
+        ? parseTime(cancelledAt)
+        : now;
+  if (!end) return typeof elapsedSeconds === 'number' ? elapsedSeconds : null;
+  return Math.max(0, (end - start) / 1000);
 }
 
 function parseTime(value?: string | null): number | null {
@@ -46,7 +107,16 @@ export function AnalysisProgress({
   stage,
   message,
   mode,
+  status,
+  createdAt,
+  queuedAt,
   startedAt,
+  completedAt,
+  failedAt,
+  cancelledAt,
+  elapsedSeconds,
+  queueWaitSeconds,
+  analysisRuntimeSeconds,
   updatedAt,
   heartbeatAt,
 }: AnalysisProgressProps) {
@@ -65,8 +135,28 @@ export function AnalysisProgress({
   const isIndeterminateAnalysis = mode === 'backend' && stage === 'analyzing' && (computedPercent ?? 0) < 85;
   const statusMessage = message || currentStep || 'Submitting media to the local SafeTrace backend.';
   const startedMs = useMemo(() => parseTime(startedAt) ?? localStartedAt, [startedAt, localStartedAt]);
-  const elapsed = mode === 'backend' ? formatElapsed(now - startedMs) : null;
+  const serverElapsedSeconds = elapsedFromServerSeconds({
+    status,
+    elapsedSeconds,
+    createdAt,
+    queuedAt,
+    startedAt,
+    completedAt,
+    failedAt,
+    cancelledAt,
+    now,
+  });
+  const elapsed = mode === 'backend'
+    ? formatDurationSeconds(serverElapsedSeconds ?? ((now - startedMs) / 1000))
+    : null;
+  const elapsedLabel = elapsedStatusLabel(status);
   const heartbeat = mode === 'backend' ? heartbeatLabel(now, heartbeatAt || updatedAt) : null;
+  const queueRuntimeCopy = queueWaitSeconds || analysisRuntimeSeconds
+    ? [
+      typeof queueWaitSeconds === 'number' ? `Queue ${formatDurationSeconds(queueWaitSeconds)}` : null,
+      typeof analysisRuntimeSeconds === 'number' ? `Analysis ${formatDurationSeconds(analysisRuntimeSeconds)}` : null,
+    ].filter(Boolean).join(' | ')
+    : null;
 
   return (
     <section className="rounded-lg border border-blue-200 bg-blue-50 p-5 text-blue-950 shadow-soft">
@@ -83,7 +173,10 @@ export function AnalysisProgress({
           {stage ? <p className="mt-1 text-xs font-semibold uppercase text-blue-700">Stage: {stage}</p> : null}
           {mode === 'backend' ? (
             <div className="mt-3 flex flex-wrap gap-2 text-xs font-semibold text-blue-800">
-              <span className="rounded-full border border-blue-200 bg-white/70 px-2.5 py-1">Elapsed {elapsed}</span>
+              <span className="rounded-full border border-blue-200 bg-white/70 px-2.5 py-1">{elapsedLabel}: {elapsed}</span>
+              {queueRuntimeCopy ? (
+                <span className="rounded-full border border-blue-200 bg-white/70 px-2.5 py-1">{queueRuntimeCopy}</span>
+              ) : null}
               <span className="rounded-full border border-blue-200 bg-white/70 px-2.5 py-1">{heartbeat}</span>
               {isIndeterminateAnalysis ? (
                 <span className="rounded-full border border-blue-200 bg-white/70 px-2.5 py-1">

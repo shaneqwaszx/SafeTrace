@@ -1,6 +1,7 @@
 import { ShieldCheck, List, Clock, BarChart2 } from 'lucide-react';
 import { useState } from 'react';
 import type { AnalysisResult, Severity } from '../types/analysis';
+import { isViolationAlignedWithProfile } from '../data/useCaseProfiles';
 import { formatConfidence, formatViolationName } from '../utils/formatters';
 import { SeverityBadge } from './SeverityBadge';
 import { ViolationCard, type GroupedViolation } from './ViolationCard';
@@ -263,8 +264,16 @@ function FrameList({ frames }: { frames: ViolationOverviewRow['supportingFrames'
 export function ViolationSummary({ result, onFrameSelect, timelineComponent, statisticsComponent }: ViolationSummaryProps) {
   // State to track which tab is currently selected
   const [activeTab, setActiveTab] = useState<TabView>('list');
-  const groupedViolations = groupViolations(result);
-  const overviewRows = buildOverviewRows(result);
+  const useCaseProfile = result.settings?.useCaseProfile ?? result.media.useCaseProfile;
+  const rawGroupedViolations = groupViolations(result);
+  const rawOverviewRows = buildOverviewRows(result);
+  const groupedViolations = useCaseProfile
+    ? rawGroupedViolations.filter((violation) => isViolationAlignedWithProfile(useCaseProfile, violation.name || violation.type))
+    : rawGroupedViolations;
+  const overviewRows = useCaseProfile
+    ? rawOverviewRows.filter((row) => isViolationAlignedWithProfile(useCaseProfile, row.name || row.type))
+    : rawOverviewRows;
+  const hiddenProfileFindingCount = rawOverviewRows.length - overviewRows.length;
 
   return (
     <section id="video-violation-overview" className="rounded-lg border border-slate-200 bg-white p-6 shadow-soft">
@@ -315,7 +324,7 @@ export function ViolationSummary({ result, onFrameSelect, timelineComponent, sta
               <span>Events</span>
               <span>Frames</span>
               <span>Span</span>
-              <span>Confidence</span>
+              <span>Evidence strength</span>
             </div>
             {overviewRows.map((row) => (
               <div
@@ -359,6 +368,12 @@ export function ViolationSummary({ result, onFrameSelect, timelineComponent, sta
           </div>
         )}
       </div>
+
+      {hiddenProfileFindingCount ? (
+        <p className="mb-6 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">
+          {hiddenProfileFindingCount} grouped finding{hiddenProfileFindingCount === 1 ? '' : 's'} from raw backend output were outside the selected use-case profile and are hidden from this prominent overview. Raw diagnostics remain available in technical evidence.
+        </p>
+      ) : null}
 
       {/* Conditional Rendering: Show content based on the active tab */}
       

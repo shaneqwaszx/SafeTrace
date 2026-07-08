@@ -2,13 +2,46 @@ export type Severity = 'High' | 'Medium' | 'Low';
 
 export type MediaType = 'video' | 'image' | 'unknown';
 
-export type MediaStatus = 'ready' | 'processing' | 'completed' | 'error';
+export type MediaStatus = 'draft' | 'ready' | 'queued' | 'processing' | 'completed' | 'error';
 
 export type DeviceMode = 'Auto' | 'CPU' | 'GPU';
 
 export type BackendConnectionState = 'live' | 'connecting' | 'connected' | 'disconnected' | 'incompatible' | 'error';
 
-export type VlmExplanationProfileId = 'rule_based' | 'lightweight_256m' | 'enhanced_2b';
+export type VlmExplanationProfileId =
+  | 'rule_based'
+  | 'lightweight_256m'
+  | 'lightweight_512m'
+  | 'enhanced_2b'
+  | 'enhanced_3b';
+
+export type UseCaseProfileId =
+  | 'seatbelt_compliance'
+  | 'phone_use'
+  | 'helmet_ppe'
+  | 'uniform_compliance'
+  | 'general_safety'
+  | 'custom_policy';
+
+export type BackendSupportLevel = 'supported' | 'partial' | 'metadata_only' | 'unsupported';
+
+export type UseCaseProfileSelection = {
+  profileId: UseCaseProfileId;
+  label: string;
+  category: string;
+  description: string;
+  defaultQuery: string;
+  supportedChecks: string[];
+  unsupportedChecks?: string[];
+  limitations?: string;
+  backendSupportLevel: BackendSupportLevel;
+  checks?: string[];
+  rules?: string[];
+  notes?: string;
+  customText?: string;
+  requestedQuery?: string;
+  effectiveQuery?: string;
+};
 
 export type AnalysisSettings = {
   fps: number;
@@ -19,6 +52,7 @@ export type AnalysisSettings = {
   enhancedVlmExplanations?: boolean;
   vlmExplanations?: boolean;
   deviceMode: DeviceMode;
+  useCaseProfile: UseCaseProfileSelection;
 };
 
 export type Violation = {
@@ -29,6 +63,16 @@ export type Violation = {
   description: string;
   confidence: number;
   evidence?: Record<string, unknown>;
+  evidenceStrength?: 'confirmed_violation' | 'likely_violation' | 'review_candidate' | 'insufficient_evidence' | 'unsupported_rule' | string;
+  confidenceReason?: string;
+  reviewRequired?: boolean;
+  ruleSupport?: string;
+  suppressedFindings?: unknown[];
+  unsupportedRuleReason?: string | null;
+  verifierAgreement?: 'supports' | 'inconclusive' | 'disagrees' | string | null;
+  verifierDisagreementReason?: string | null;
+  verifierConfidenceHint?: string | null;
+  finalReviewerNote?: string | null;
 };
 
 export type Detection = {
@@ -55,7 +99,7 @@ export type FrameResult = {
   frameScore?: number;
   visualVariant?: 'worksite' | 'loading-bay' | 'maintenance';
   explanation?: string;
-  explanationSource?: 'vlm' | 'vlm_local' | 'vlm_ollama' | 'vlm_lightweight' | 'vlm_enhanced' | 'rule_based';
+  explanationSource?: 'vlm' | 'vlm_local' | 'vlm_ollama' | 'vlm_lightweight' | 'vlm_enhanced' | 'rule_template_plus_vlm' | 'rule_template_plus_lightweight_vlm' | 'rule_template_plus_lightweight_plus_enhanced' | 'rule_based';
   violations: Violation[];
   detections: Detection[];
   technicalEvidence: Record<string, unknown>;
@@ -85,6 +129,10 @@ export type MediaItem = {
   jobId?: string;
   selectedJobId?: string;
   batchId?: string;
+  useCaseProfile?: UseCaseProfileSelection;
+  requestedQuery?: string;
+  effectiveQuery?: string;
+  errorMessage?: string;
 };
 
 export type BackendHealth = {
@@ -121,6 +169,14 @@ export type VlmProfileStatus = {
   resourceLevel?: string;
   path?: string | null;
   message?: string | null;
+  statusCopy?: string | null;
+  deprecated?: boolean;
+  notViable?: boolean;
+  candidate?: boolean;
+  legacy?: boolean;
+  fallback?: boolean;
+  requiresGpu?: boolean;
+  deviceDecision?: Record<string, unknown> | null;
 };
 
 export type SystemVlmStatus = {
@@ -141,6 +197,14 @@ export type SystemVlmStatus = {
   lightweightVlmWorkerEnabled?: boolean | null;
   lightweightVlmWorkerTimeoutSeconds?: number | null;
   lightweightVlmExplanationSource?: string | null;
+  lightweightVlmEvidenceBudget?: number | null;
+  lightweightVlmJobTimeoutSeconds?: number | null;
+  lightweightVlmMaxQualityFailures?: number | null;
+  lightweightVlmPrimaryPolicy?: string | null;
+  lightweightVlmFallbackPolicy?: string | null;
+  lightweightVlmCpuPrefer256m?: boolean | null;
+  enhancedVlmRequiresGpu?: boolean | null;
+  deviceGateway?: Record<string, unknown> | null;
 };
 
 export type SystemRuntimeStatus = {
@@ -153,6 +217,11 @@ export type SystemRuntimeStatus = {
   device?: {
     configured?: string;
     gpuAvailable?: boolean;
+    gateway?: Record<string, unknown>;
+    detector?: Record<string, unknown>;
+    mobileSam?: Record<string, unknown>;
+    lightweightVlm?: Record<string, unknown>;
+    enhancedVlm?: Record<string, unknown>;
   };
   analysis?: {
     safeMode?: boolean;
@@ -161,7 +230,13 @@ export type SystemRuntimeStatus = {
     mobileSamWorkerTimeoutSeconds?: number;
     lightweightVlmWorkerEnabled?: boolean;
     lightweightVlmWorkerTimeoutSeconds?: number;
+    lightweightVlmEvidenceBudget?: number;
+    lightweightVlmJobTimeoutSeconds?: number;
+    lightweightVlmMaxQualityFailures?: number;
     effectiveDevice?: string;
+    mobileSamDevice?: string | null;
+    lightweightVlmDevice?: string | null;
+    enhancedVlmDevice?: string | null;
     safeModeMessage?: string | null;
     analysisJobTimeoutSeconds?: number;
   };
@@ -195,7 +270,7 @@ export type SystemRuntimeStatus = {
   jobStorePath?: string;
   visual_explanations?: RuntimeCheck & {
     fallback?: 'rule_based';
-    explanationSource?: 'vlm' | 'rule_based';
+    explanationSource?: 'vlm' | 'rule_template_plus_vlm' | 'rule_template_plus_lightweight_vlm' | 'rule_template_plus_lightweight_plus_enhanced' | 'rule_based';
     enhancedVlmAvailable?: boolean;
     requestedVisualExplanationMode?: string | null;
     actualExplanationMode?: string | null;
@@ -205,6 +280,9 @@ export type SystemRuntimeStatus = {
     lightweightVlmWorkerEnabled?: boolean | null;
     lightweightVlmWorkerTimeoutSeconds?: number | null;
     lightweightVlmExplanationSource?: string | null;
+    lightweightVlmEvidenceBudget?: number | null;
+    lightweightVlmJobTimeoutSeconds?: number | null;
+    lightweightVlmMaxQualityFailures?: number | null;
   };
 };
 
@@ -241,6 +319,7 @@ export type AnalysisRequest = {
   vlmProfile?: VlmExplanationProfileId;
   vlmEnabled?: boolean;
   device: DeviceMode;
+  useCaseProfile?: UseCaseProfileSelection;
 };
 
 export type BatchAnalysisRequest = {
@@ -252,6 +331,7 @@ export type BatchAnalysisRequest = {
   vlmProfile?: VlmExplanationProfileId;
   vlmEnabled?: boolean;
   device: DeviceMode;
+  useCaseProfile?: UseCaseProfileSelection;
 };
 
 export type AnalysisJob = {
@@ -268,10 +348,20 @@ export type JobStatus = AnalysisJob & {
   error?: string | null;
   metrics?: Record<string, unknown>;
   componentDiagnostics?: Record<string, unknown> | null;
+  createdAt?: string | null;
+  queuedAt?: string | null;
   updatedAt?: string | null;
   startedAt?: string | null;
   finishedAt?: string | null;
+  completedAt?: string | null;
+  failedAt?: string | null;
+  cancelledAt?: string | null;
+  elapsedSeconds?: number | null;
+  queueWaitSeconds?: number | null;
+  analysisRuntimeSeconds?: number | null;
   heartbeatAt?: string | null;
+  persistenceWarning?: string | null;
+  manifestPersistenceWarning?: string | null;
 };
 
 export type BatchAcceptedFile = {
@@ -299,6 +389,7 @@ export type BatchStatus = {
   statusCounts: Record<string, number>;
   createdAt: string;
   updatedAt: string;
+  persistenceWarning?: string | null;
 };
 
 export type ViolationEvent = {
@@ -325,6 +416,14 @@ export type ViolationEvent = {
 export type AnalysisResult = {
   jobId?: string;
   status?: 'completed';
+  createdAt?: string | null;
+  queuedAt?: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  completedAt?: string | null;
+  elapsedSeconds?: number | null;
+  queueWaitSeconds?: number | null;
+  analysisRuntimeSeconds?: number | null;
   id: string;
   query: string;
   media: MediaItem;

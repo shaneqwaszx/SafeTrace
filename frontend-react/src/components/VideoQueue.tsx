@@ -11,14 +11,19 @@ type VideoQueueProps = {
   onPreviewMedia?: (media: MediaItem) => void;
   onUploadClick?: () => void;
   uploadDisabled?: boolean;
+  activeAnalysisMediaIds?: Record<string, true>;
 };
 
 function StatusIcon({ status }: { status: MediaStatus }) {
   switch (status) {
+    case 'draft':
+      return <Edit3 className="h-4 w-4 text-slate-500" />;
     case 'completed':
       return <CheckCircle2 className="h-4 w-4 text-emerald-500" />;
     case 'processing':
       return <LoaderCircle className="h-4 w-4 animate-spin text-blue-500" />;
+    case 'queued':
+      return <Clock className="h-4 w-4 text-amber-500" />;
     case 'error':
       return <AlertCircle className="h-4 w-4 text-red-500" />;
     default:
@@ -28,7 +33,9 @@ function StatusIcon({ status }: { status: MediaStatus }) {
 
 function StatusBadgeVideo({ status }: { status: MediaStatus }) {
   const styles: Record<MediaStatus, string> = {
+    draft: 'bg-slate-100 text-slate-700 border-slate-200',
     ready: 'bg-slate-100 text-slate-700 border-slate-200',
+    queued: 'bg-amber-50 text-amber-700 border-amber-200',
     processing: 'bg-blue-50 text-blue-700 border-blue-200',
     completed: 'bg-emerald-50 text-emerald-700 border-emerald-200',
     error: 'bg-red-50 text-red-700 border-red-200',
@@ -49,14 +56,15 @@ export function VideoQueue({
   onPreviewMedia,
   onUploadClick,
   uploadDisabled = false,
+  activeAnalysisMediaIds = {},
 }: VideoQueueProps) {
   return (
     <div className="flex h-full flex-col gap-4 overflow-auto p-5">
       <div className="flex items-center gap-2">
         <HardDrive className="h-5 w-5 text-safety-blue" />
         <div>
-          <p className="text-sm font-bold text-slate-950">Video Queue</p>
-          <p className="text-xs text-slate-500">{mediaLibrary.length} media item{mediaLibrary.length !== 1 ? 's' : ''}</p>
+          <p className="text-sm font-bold text-slate-950">Job Queue</p>
+          <p className="text-xs text-slate-500">{mediaLibrary.length} job item{mediaLibrary.length !== 1 ? 's' : ''}</p>
         </div>
 
         <button
@@ -80,6 +88,7 @@ export function VideoQueue({
 
         {mediaLibrary.map((media) => {
           const isSelected = media.id === selectedMedia?.id;
+          const isActiveAnalysis = Boolean(activeAnalysisMediaIds[media.id]);
           const Icon = media.type === 'video' ? FileVideo : media.type === 'image' ? FileImage : Archive;
           const resultJobId = media.selectedJobId || media.jobId;
 
@@ -105,6 +114,19 @@ export function VideoQueue({
                     <p className="truncate text-sm font-semibold text-slate-950">{media.filename}</p>
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       <StatusBadgeVideo status={media.status} />
+                      {isActiveAnalysis ? (
+                        <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-semibold uppercase text-blue-700">
+                          Active job
+                        </span>
+                      ) : media.status === 'queued' ? (
+                        <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold uppercase text-amber-700">
+                          Waiting for worker
+                        </span>
+                      ) : media.status === 'draft' || media.status === 'ready' ? (
+                        <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold uppercase text-slate-600">
+                          Draft
+                        </span>
+                      ) : null}
                       <span className="text-[10px] font-medium text-slate-500">{media.sizeLabel}</span>
                       {media.duration && (
                         <span className="text-[10px] font-medium text-slate-500">{media.duration}</span>
@@ -113,6 +135,21 @@ export function VideoQueue({
                     {media.uploadedAt && (
                       <p className="mt-1 text-[10px] text-slate-400">{formatDateTime(media.uploadedAt)}</p>
                     )}
+                    {media.useCaseProfile ? (
+                      <p className="mt-1 text-[10px] font-semibold text-slate-500">
+                        Profile: {media.useCaseProfile.label}
+                      </p>
+                    ) : null}
+                    {media.effectiveQuery ? (
+                      <p className="mt-1 line-clamp-2 text-[10px] text-slate-500">
+                        Query: {media.effectiveQuery}
+                      </p>
+                    ) : null}
+                    {media.errorMessage ? (
+                      <p className="mt-1 line-clamp-2 text-[10px] font-semibold text-red-600">
+                        Error: {media.errorMessage}
+                      </p>
+                    ) : null}
                   </div>
                 </div>
               </button>

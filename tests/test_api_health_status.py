@@ -1,11 +1,14 @@
 from fastapi.testclient import TestClient
+from types import SimpleNamespace
 
 import src.chat_service as chat_service
+import src.device_gateway as device_gateway
 from src.api.batches import BatchStore
 import src.api.jobs as jobs_module
 import src.api.server as server_module
 from src.api.jobs import JobStore
 from src.api.server import create_app
+from src.device_gateway import HardwareGpuStatus, TorchDeviceStatus
 import src.vlm_reasoner as vlm_reasoner
 
 
@@ -28,6 +31,112 @@ def llama_diagnostics(import_ok: bool):
         "setupCommand": r".venv\Scripts\python.exe -m pip install llama-cpp-python",
         "restartRequired": "Restart the SafeTrace backend after installing llama-cpp-python.",
     }
+
+
+def _gateway_settings(**overrides):
+    values = {
+        "device": "auto",
+        "lightweight_vlm_device": "auto",
+        "enhanced_vlm_device": "cuda",
+        "mobile_sam_device": "auto",
+        "enable_gpu_auto": True,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _cpu_device_gateway_payload():
+    cpu_decision = {
+        "component": "detector",
+        "configured": "cpu",
+        "selected": "cpu",
+        "available": True,
+        "reason": "CPU explicitly configured.",
+        "requires_gpu": False,
+    }
+    return {
+        "configuredDevice": "cpu",
+        "gpuAutoEnabled": True,
+        "torch": {
+            "installed": True,
+            "cuda_available": False,
+            "cuda_device_count": 0,
+            "gpu_name": None,
+            "total_gpu_memory_mb": None,
+            "reserved_gpu_memory_mb": None,
+            "allocated_gpu_memory_mb": None,
+            "error": None,
+        },
+        "hardware": {
+            "nvidia_smi_available": False,
+            "nvidia_gpu_detected": False,
+            "gpu_name": None,
+            "error": "nvidia-smi not found",
+        },
+        "components": {
+            "detector": cpu_decision,
+            "mobileSam": {**cpu_decision, "component": "mobileSam"},
+            "lightweightVlm": {**cpu_decision, "component": "lightweightVlm"},
+            "enhancedVlm": {
+                "component": "enhancedVlm",
+                "configured": "cuda",
+                "selected": "unavailable",
+                "available": False,
+                "reason": "PyTorch CUDA runtime is unavailable.",
+                "requires_gpu": True,
+            },
+        },
+        "gpuUnavailableReason": "No CUDA-capable GPU reported by PyTorch.",
+    }
+
+
+def test_device_gateway_selects_cpu_for_lightweight_when_cuda_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        device_gateway,
+        "torch_status",
+        lambda: TorchDeviceStatus(installed=True, cuda_available=False, cuda_device_count=0),
+    )
+    monkeypatch.setattr(
+        device_gateway,
+        "hardware_gpu_status",
+        lambda: HardwareGpuStatus(nvidia_smi_available=False, nvidia_gpu_detected=False, error="nvidia-smi not found"),
+    )
+
+    payload = device_gateway.device_gateway_payload(_gateway_settings())
+
+    assert payload["components"]["lightweightVlm"]["selected"] == "cpu"
+    assert payload["components"]["lightweightVlm"]["available"] is True
+    assert payload["components"]["enhancedVlm"]["available"] is False
+    assert payload["components"]["enhancedVlm"]["selected"] == "unavailable"
+    assert "CUDA" in payload["components"]["enhancedVlm"]["reason"]
+
+
+def test_device_gateway_selects_cuda_for_auto_components_when_available(monkeypatch):
+    monkeypatch.setattr(
+        device_gateway,
+        "torch_status",
+        lambda: TorchDeviceStatus(
+            installed=True,
+            cuda_available=True,
+            cuda_device_count=1,
+            gpu_name="RTX Test",
+            total_gpu_memory_mb=8192,
+        ),
+    )
+    monkeypatch.setattr(
+        device_gateway,
+        "hardware_gpu_status",
+        lambda: HardwareGpuStatus(nvidia_smi_available=True, nvidia_gpu_detected=True, gpu_name="RTX Test"),
+    )
+
+    payload = device_gateway.device_gateway_payload(_gateway_settings())
+
+    assert payload["torch"]["cuda_available"] is True
+    assert payload["components"]["detector"]["selected"] == "cuda"
+    assert payload["components"]["mobileSam"]["selected"] == "cuda"
+    assert payload["components"]["lightweightVlm"]["selected"] == "cuda"
+    assert payload["components"]["enhancedVlm"]["available"] is True
+    assert payload["components"]["enhancedVlm"]["selected"] == "cuda"
 
 
 def test_health_does_not_instantiate_pipeline(monkeypatch, tmp_path):
@@ -121,6 +230,7 @@ def test_system_status_reports_missing_paths_without_loading_models(monkeypatch,
     monkeypatch.delenv("SAFETRACE_BUILD_MODE", raising=False)
     monkeypatch.delenv("SAFETRACE_RUNTIME_LAYOUT", raising=False)
     monkeypatch.setattr(server_module, "_gpu_available", lambda: False)
+    monkeypatch.setattr(server_module, "device_gateway_payload", lambda settings: _cpu_device_gateway_payload())
     monkeypatch.setattr(server_module.SETTINGS, "device", "cpu")
     monkeypatch.setattr(server_module.SETTINGS, "enable_vlm", True)
     monkeypatch.setattr(server_module.SETTINGS, "mobile_sam_enabled", "auto")
@@ -163,6 +273,8 @@ def test_system_status_reports_missing_paths_without_loading_models(monkeypatch,
     assert body["limits"]["maxVideoDurationUnlimited"] is True
     assert "No explicit video duration cap" in body["limits"]["maxVideoDurationMessage"]
     assert body["limits"]["embeddingPoolingStrategy"] in {"mean", "max"}
+    assert body["limits"]["analysisConcurrency"] >= 1
+    assert body["limits"]["vlmConcurrency"] >= 1
     assert body["queue"]["statusCounts"] == {}
 
 
@@ -273,7 +385,9 @@ def test_system_status_reports_chat_runtime_diagnostics(monkeypatch, tmp_path):
 
 def test_system_status_includes_vlm_profiles_with_installed_assets(monkeypatch, tmp_path):
     lightweight = tmp_path / "models" / "vlm" / "lightweight-256m"
+    lightweight_512m = tmp_path / "models" / "vlm" / "lightweight-512m"
     enhanced = tmp_path / "models" / "vlm" / "enhanced-2b"
+    enhanced_3b = tmp_path / "models" / "vlm" / "enhanced-3b"
     lightweight.mkdir(parents=True)
     enhanced.mkdir(parents=True)
     (lightweight / "config.json").write_text("{}", encoding="utf-8")
@@ -283,8 +397,32 @@ def test_system_status_includes_vlm_profiles_with_installed_assets(monkeypatch, 
     monkeypatch.setattr(server_module.SETTINGS, "enable_vlm", False)
     monkeypatch.setattr(server_module.SETTINGS, "vlm_enabled", "auto")
     monkeypatch.setattr(server_module.SETTINGS, "vlm_lightweight_model_path", lightweight)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_lightweight_512m_model_path", lightweight_512m)
     monkeypatch.setattr(server_module.SETTINGS, "vlm_enhanced_model_path", enhanced)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_enhanced_3b_model_path", enhanced_3b)
     monkeypatch.setattr(server_module, "_vlm_runtime_available", lambda: True)
+    monkeypatch.setattr(
+        server_module,
+        "device_gateway_payload",
+        lambda settings: {
+            "configuredDevice": "auto",
+            "gpuAutoEnabled": True,
+            "torch": {"installed": True, "cuda_available": True, "cuda_device_count": 1},
+            "hardware": {"nvidia_smi_available": True, "nvidia_gpu_detected": True, "gpu_name": "RTX Test"},
+            "components": {
+                "detector": {"selected": "cuda", "available": True, "reason": "Auto selected CUDA."},
+                "mobileSam": {"selected": "cuda", "available": True, "reason": "Auto selected CUDA."},
+                "lightweightVlm": {"selected": "cuda", "available": True, "reason": "Auto selected CUDA."},
+                "enhancedVlm": {
+                    "selected": "cuda",
+                    "available": True,
+                    "requires_gpu": True,
+                    "reason": "PyTorch CUDA runtime is available.",
+                },
+            },
+            "gpuUnavailableReason": None,
+        },
+    )
 
     response = make_client(tmp_path).get("/api/system/status")
 
@@ -297,7 +435,7 @@ def test_system_status_includes_vlm_profiles_with_installed_assets(monkeypatch, 
     assert body["vlm"]["requestedVisualExplanationMode"] == "rule_based"
     assert body["vlm"]["actualExplanationMode"] == "rule_based"
     assert body["vlm"]["ruleBasedFallbackActive"] is True
-    assert body["vlm"]["lightweightModelPathChecked"].replace("\\", "/").endswith("models/vlm/lightweight-256m")
+    assert body["vlm"]["lightweightModelPathChecked"].replace("\\", "/").endswith("models/vlm/lightweight-512m")
     assert body["vlm"]["runtimeAvailable"] is True
     assert profiles["rule_based"]["installed"] is True
     assert profiles["rule_based"]["available"] is True
@@ -305,9 +443,50 @@ def test_system_status_includes_vlm_profiles_with_installed_assets(monkeypatch, 
     assert profiles["lightweight_256m"]["installed"] is True
     assert profiles["lightweight_256m"]["available"] is True
     assert profiles["lightweight_256m"]["resourceLevel"] == "low"
+    assert profiles["lightweight_256m"]["deprecated"] is False
+    assert profiles["lightweight_256m"]["notViable"] is False
+    assert profiles["lightweight_256m"]["fallback"] is True
+    assert "Low-resource 256M verifier fallback layer" in profiles["lightweight_256m"]["message"]
+    assert profiles["lightweight_512m"]["installed"] is False
+    assert profiles["lightweight_512m"]["available"] is False
+    assert profiles["lightweight_512m"]["candidate"] is True
+    assert profiles["lightweight_512m"]["resourceLevel"] == "medium"
     assert profiles["enhanced_2b"]["installed"] is True
     assert profiles["enhanced_2b"]["available"] is True
-    assert profiles["enhanced_2b"]["resourceLevel"] == "high"
+    assert profiles["enhanced_2b"]["resourceLevel"] == "gpu_high"
+    assert profiles["enhanced_2b"]["requiresGpu"] is True
+    assert profiles["enhanced_3b"]["installed"] is False
+    assert profiles["enhanced_3b"]["available"] is False
+    assert profiles["enhanced_3b"]["candidate"] is True
+    assert profiles["enhanced_3b"]["resourceLevel"] == "very_high"
+
+
+def test_system_status_reports_candidate_vlm_profiles_when_assets_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_profile", "rule_based")
+    monkeypatch.setattr(server_module.SETTINGS, "enable_vlm", False)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_enabled", "auto")
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_lightweight_model_path", tmp_path / "missing-256")
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_lightweight_512m_model_path", tmp_path / "missing-512")
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_enhanced_model_path", tmp_path / "missing-2b")
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_enhanced_3b_model_path", tmp_path / "missing-3b")
+    monkeypatch.setattr(server_module, "_vlm_runtime_available", lambda: True)
+
+    response = make_client(tmp_path).get("/api/system/status")
+
+    assert response.status_code == 200
+    profiles = {profile["id"]: profile for profile in response.json()["vlm"]["profiles"]}
+    assert profiles["rule_based"]["available"] is True
+    assert profiles["lightweight_256m"]["installed"] is False
+    assert profiles["lightweight_256m"]["deprecated"] is False
+    assert profiles["lightweight_256m"]["fallback"] is True
+    assert profiles["lightweight_512m"]["installed"] is False
+    assert profiles["lightweight_512m"]["available"] is False
+    assert "512M lightweight verifier layer" in profiles["lightweight_512m"]["message"]
+    assert profiles["enhanced_3b"]["installed"] is False
+    assert profiles["enhanced_3b"]["available"] is False
+    assert "Enhanced 3B VLM candidate" in profiles["enhanced_3b"]["message"]
+    assert response.json()["vlm"]["selectedProfile"] == "rule_based"
+    assert response.json()["vlm"]["active"] is False
 
 
 def test_system_status_vlm_profiles_ignore_readme_only_placeholders(monkeypatch, tmp_path):
@@ -319,7 +498,9 @@ def test_system_status_vlm_profiles_ignore_readme_only_placeholders(monkeypatch,
     (enhanced / "README.md").write_text("placeholder", encoding="utf-8")
 
     monkeypatch.setattr(server_module.SETTINGS, "vlm_lightweight_model_path", lightweight)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_lightweight_512m_model_path", tmp_path / "missing-512")
     monkeypatch.setattr(server_module.SETTINGS, "vlm_enhanced_model_path", enhanced)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_enhanced_3b_model_path", tmp_path / "missing-3b")
     monkeypatch.setattr(server_module, "_vlm_runtime_available", lambda: True)
 
     response = make_client(tmp_path).get("/api/system/status")
@@ -329,8 +510,12 @@ def test_system_status_vlm_profiles_ignore_readme_only_placeholders(monkeypatch,
     assert profiles["rule_based"]["installed"] is True
     assert profiles["lightweight_256m"]["installed"] is False
     assert profiles["lightweight_256m"]["available"] is False
+    assert profiles["lightweight_512m"]["installed"] is False
+    assert profiles["lightweight_512m"]["available"] is False
     assert profiles["enhanced_2b"]["installed"] is False
     assert profiles["enhanced_2b"]["available"] is False
+    assert profiles["enhanced_3b"]["installed"] is False
+    assert profiles["enhanced_3b"]["available"] is False
 
 
 def test_system_status_does_not_report_vlm_parent_directory_as_loadable(monkeypatch, tmp_path):
@@ -344,7 +529,9 @@ def test_system_status_does_not_report_vlm_parent_directory_as_loadable(monkeypa
     monkeypatch.setattr(server_module.SETTINGS, "vlm_provider", "local")
     monkeypatch.setattr(server_module.SETTINGS, "vlm_model_dir", parent)
     monkeypatch.setattr(server_module.SETTINGS, "vlm_lightweight_model_path", lightweight)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_lightweight_512m_model_path", tmp_path / "missing-512")
     monkeypatch.setattr(server_module.SETTINGS, "vlm_enhanced_model_path", enhanced)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_enhanced_3b_model_path", tmp_path / "missing-3b")
     monkeypatch.setattr(server_module, "_vlm_runtime_available", lambda: True)
     monkeypatch.setattr(vlm_reasoner, "_transformers_runtime_available", lambda: True)
 
@@ -358,6 +545,7 @@ def test_system_status_does_not_report_vlm_parent_directory_as_loadable(monkeypa
     profiles = {profile["id"]: profile for profile in body["vlm"]["profiles"]}
     assert profiles["lightweight_256m"]["installed"] is True
     assert profiles["lightweight_256m"]["path"].replace("\\", "/").endswith("models/vlm/lightweight-256m")
+    assert profiles["lightweight_512m"]["installed"] is False
 
 
 def test_vlm_settings_endpoint_updates_selection_without_loading_model(monkeypatch, tmp_path):
@@ -399,6 +587,38 @@ def test_vlm_settings_endpoint_updates_selection_without_loading_model(monkeypat
     assert status["models"]["vlm"]["path"].replace("\\", "/").endswith("models/vlm/lightweight-256m")
 
 
+def test_vlm_settings_endpoint_does_not_activate_removed_lightweight_profile(monkeypatch, tmp_path):
+    lightweight_512m = tmp_path / "models" / "vlm" / "lightweight-512m"
+    lightweight_512m.mkdir(parents=True)
+    (lightweight_512m / "model.safetensors").write_bytes(b"placeholder")
+
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_profile", "rule_based")
+    monkeypatch.setattr(server_module.SETTINGS, "enable_vlm", False)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_enabled", "auto")
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_lightweight_model_path", tmp_path / "models" / "vlm" / "lightweight-256m")
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_lightweight_512m_model_path", lightweight_512m)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_enhanced_model_path", tmp_path / "models" / "vlm" / "enhanced-2b")
+    monkeypatch.setattr(server_module, "_vlm_runtime_available", lambda: True)
+
+    client = make_client(tmp_path)
+    response = client.post(
+        "/api/system/vlm/settings",
+        json={"selectedProfile": "lightweight_256m", "enabled": True},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["selectedProfile"] == "lightweight_256m"
+    assert body["enabled"] is False
+    assert body["active"] is False
+    assert body["actualExplanationMode"] == "rule_based"
+    assert "unavailable" in body["message"].lower()
+    profiles = {profile["id"]: profile for profile in body["profiles"]}
+    assert profiles["lightweight_256m"]["installed"] is False
+    assert profiles["lightweight_512m"]["installed"] is True
+    assert profiles["lightweight_512m"]["available"] is True
+
+
 def test_safe_mode_lightweight_vlm_worker_status_can_be_active(monkeypatch, tmp_path):
     lightweight = tmp_path / "models" / "vlm" / "lightweight-256m"
     enhanced = tmp_path / "models" / "vlm" / "enhanced-2b"
@@ -432,10 +652,64 @@ def test_safe_mode_lightweight_vlm_worker_status_can_be_active(monkeypatch, tmp_
     assert status["vlm"]["lightweightVlmWorkerEnabled"] is True
     assert status["runtime"]["analysis"]["lightweightVlmWorkerEnabled"] is True
     assert status["runtime"]["analysis"]["safeModeMessage"] == (
-        "Experimental: MobileSAM worker + Lightweight VLM worker. Rule-based fallback active."
+        "MobileSAM worker + Local VLM Assist active. Fast Local Analysis remains available."
     )
     assert status["models"]["vlm"]["status"] == "available"
     assert status["models"]["vlm"]["details"]["lightweightVlmWorkerEnabled"] is True
+
+
+def test_safe_mode_lightweight_vlm_worker_can_be_active_without_mobilesam(monkeypatch, tmp_path):
+    lightweight = tmp_path / "models" / "vlm" / "lightweight-256m"
+    enhanced = tmp_path / "models" / "vlm" / "enhanced-2b"
+    lightweight.mkdir(parents=True)
+    enhanced.mkdir(parents=True)
+    (lightweight / "model.safetensors").write_bytes(b"placeholder")
+
+    monkeypatch.setattr(server_module.SETTINGS, "analysis_safe_mode", True)
+    monkeypatch.setattr(server_module.SETTINGS, "safe_mode_allow_mobilesam", False)
+    monkeypatch.setattr(server_module.SETTINGS, "mobile_sam_enabled", "false")
+    monkeypatch.setattr(server_module.SETTINGS, "mobile_sam_worker_enabled", False)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_profile", "lightweight_256m")
+    monkeypatch.setattr(server_module.SETTINGS, "enable_vlm", False)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_enabled", "true")
+    monkeypatch.setattr(server_module.SETTINGS, "lightweight_vlm_worker_enabled", True)
+    monkeypatch.setattr(server_module.SETTINGS, "lightweight_vlm_worker_timeout_seconds", 120)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_max_evidence_frames", 5)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_job_timeout_seconds", 60)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_max_quality_failures", 1)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_lightweight_model_path", lightweight)
+    monkeypatch.setattr(server_module.SETTINGS, "vlm_enhanced_model_path", enhanced)
+    monkeypatch.setattr(server_module, "_vlm_runtime_available", lambda: True)
+
+    client = make_client(tmp_path)
+    status = client.get("/api/system/status").json()
+
+    assert status["safeMode"] is True
+    assert status["runtime"]["analysis"]["safeMode"] is True
+    assert status["runtime"]["analysis"]["safeModeMobileSamAllowed"] is False
+    assert status["runtime"]["analysis"]["mobileSamWorkerEnabled"] is False
+    assert status["runtime"]["analysis"]["lightweightVlmWorkerEnabled"] is True
+    assert status["runtime"]["analysis"]["lightweightVlmWorkerTimeoutSeconds"] == 120
+    assert status["runtime"]["analysis"]["lightweightVlmEvidenceBudget"] == 5
+    assert status["runtime"]["analysis"]["lightweightVlmFrameLimit"] == 5
+    assert status["runtime"]["analysis"]["lightweightVlmJobTimeoutSeconds"] == 60
+    assert status["runtime"]["analysis"]["lightweightVlmMaxQualityFailures"] == 1
+    assert status["runtime"]["analysis"]["safeModeMessage"] == (
+        "Local VLM Assist worker enabled. Fast Local Analysis remains available; MobileSAM disabled."
+    )
+    assert status["vlm"]["selectedProfile"] == "lightweight_256m"
+    assert status["vlm"]["active"] is True
+    assert status["vlm"]["lightweightVlmWorkerEnabled"] is True
+    assert status["vlm"]["lightweightVlmExplanationSource"] == "worker"
+    assert status["vlm"]["lightweightVlmEvidenceBudget"] == 5
+    assert status["vlm"]["lightweightVlmFrameLimit"] == 5
+    assert status["vlm"]["lightweightVlmJobTimeoutSeconds"] == 60
+    assert status["vlm"]["lightweightVlmMaxQualityFailures"] == 1
+    assert status["runtime"]["visual_explanations"]["lightweightVlmWorkerEnabled"] is True
+    assert status["runtime"]["visual_explanations"]["lightweightVlmExplanationSource"] == "worker"
+    assert status["runtime"]["visual_explanations"]["lightweightVlmEvidenceBudget"] == 5
+    assert status["runtime"]["visual_explanations"]["lightweightVlmFrameLimit"] == 5
+    assert status["runtime"]["visual_explanations"]["lightweightVlmJobTimeoutSeconds"] == 60
 
 
 def test_vlm_settings_endpoint_respects_hard_disabled_configuration(monkeypatch, tmp_path):
@@ -460,7 +734,7 @@ def test_vlm_settings_endpoint_respects_hard_disabled_configuration(monkeypatch,
     assert body["selectedProfile"] == "lightweight_256m"
     assert body["enabled"] is False
     assert body["active"] is False
-    assert body["message"] == "VLM is disabled by configuration. Rule-based explanations remain active."
+    assert body["message"] == "Local visual review is disabled by configuration. Fast Local Analysis remains available."
 
     status = client.get("/api/system/status").json()
     assert status["vlm"]["selectedProfile"] == "lightweight_256m"
@@ -486,7 +760,7 @@ def test_vlm_settings_endpoint_preserves_rule_based_fallback_for_missing_profile
     assert response.status_code == 200
     body = response.json()
     assert body["selectedProfile"] == "enhanced_2b"
-    assert body["enabled"] is True
+    assert body["enabled"] is False
     assert body["active"] is False
     assert body["actualExplanationMode"] == "rule_based"
 
@@ -502,6 +776,7 @@ def test_safe_mode_system_status_suppresses_vlm_without_profile_preflight(monkey
     monkeypatch.setattr(server_module.SETTINGS, "analysis_safe_mode", True)
     monkeypatch.setattr(server_module.SETTINGS, "vlm_profile", "lightweight_256m")
     monkeypatch.setattr(server_module.SETTINGS, "vlm_lightweight_model_path", lightweight)
+    monkeypatch.setattr(server_module, "device_gateway_payload", lambda settings: _cpu_device_gateway_payload())
     monkeypatch.setattr(server_module, "_vlm_runtime_available", fail_if_vlm_runtime_checked)
 
     client = make_client(tmp_path)
@@ -525,13 +800,19 @@ def test_safe_mode_system_status_suppresses_vlm_without_profile_preflight(monkey
     assert body["safeMode"] is True
     assert body["runtime"]["analysis"]["safeMode"] is True
     assert body["runtime"]["analysis"]["effectiveDevice"] == "cpu"
+    assert "deviceGateway" in body["limits"]
+    assert "gateway" in body["runtime"]["device"]
+    assert "lightweightVlmDevice" in body["runtime"]["analysis"]
+    assert "enhancedVlmDevice" in body["runtime"]["analysis"]
+    assert "deviceGateway" in body["vlm"]
+    assert "lightweightVlmPrimaryPolicy" in body["models"]["vlm"]["details"]
     assert body["models"]["mobileSam"]["status"] == "disabled"
     assert body["models"]["vlm"]["status"] == "disabled"
     assert body["vlm"]["vlmSuppressedReason"] == "safe_mode"
-    assert body["vlm"]["profiles"][1]["message"] == "Not checked in safe local mode."
+    assert "Low-resource 256M verifier fallback layer" in body["vlm"]["profiles"][1]["message"]
     assert body["vlm"]["ruleBasedFallbackActive"] is True
     assert body["vlm"]["fallbackReason"]
-    assert "Rule-based explanations only" in body["vlm"]["message"]
+    assert "Fast Local Analysis remains available" in body["vlm"]["message"]
 
 
 def test_safe_mode_system_status_allows_experimental_mobilesam_without_vlm(monkeypatch, tmp_path):
@@ -547,6 +828,7 @@ def test_safe_mode_system_status_allows_experimental_mobilesam_without_vlm(monke
     monkeypatch.setattr(server_module.SETTINGS, "enable_vlm", False)
     monkeypatch.setattr(server_module.SETTINGS, "vlm_enabled", "disabled")
     monkeypatch.setattr(server_module, "_mobile_sam_runtime_available", lambda: True)
+    monkeypatch.setattr(server_module, "device_gateway_payload", lambda settings: _cpu_device_gateway_payload())
     client = make_client(tmp_path)
 
     response = client.get("/api/system/status")
@@ -557,7 +839,7 @@ def test_safe_mode_system_status_allows_experimental_mobilesam_without_vlm(monke
     assert body["runtime"]["analysis"]["safeMode"] is True
     assert body["runtime"]["analysis"]["safeModeMobileSamAllowed"] is True
     assert body["runtime"]["analysis"]["effectiveDevice"] == "cpu"
-    assert "experimental MobileSAM" in body["runtime"]["analysis"]["safeModeMessage"]
+    assert "MobileSAM refinement may run on selected evidence frames" in body["runtime"]["analysis"]["safeModeMessage"]
     assert body["models"]["mobileSam"]["status"] == "available"
     assert body["models"]["mobileSam"]["details"]["safeModeMobileSamAllowed"] is True
     assert body["models"]["mobileSam"]["details"]["mobileSamEnabled"] is True

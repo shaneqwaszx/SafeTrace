@@ -157,6 +157,12 @@ All settings live in `src/config.py` and accept environment overrides:
 | `SAFETRACE_VLM_ENABLED`      | `auto`                                           | Optional local VLM availability mode |
 | `SAFETRACE_VLM_PROVIDER`     | `auto`                                           | Prefer local VLM, then optional Ollama, then rule-based fallback |
 | `SAFETRACE_VLM_MODEL_PATH`   | `models/vlm`                                     | Optional packaged local VLM asset dir |
+| `SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED` | `0`                              | Run Lightweight VLM in a crash-isolated worker process |
+| `SAFETRACE_LIGHTWEIGHT_VLM_WORKER_TIMEOUT_SECONDS` | `60`                    | Per-worker Lightweight VLM subprocess timeout |
+| `SAFETRACE_VLM_FRAME_LIMIT` | `5`                                            | Maximum selected evidence frames that may run local visual review |
+| `SAFETRACE_VLM_MAX_EVIDENCE_FRAMES` | `5`                                    | Legacy-compatible alias for the local visual review frame limit |
+| `SAFETRACE_VLM_JOB_TIMEOUT_SECONDS` | `0`                                    | Shared local VLM job budget; `0` disables it in favor of per-attempt watchdogs |
+| `SAFETRACE_VLM_MAX_QUALITY_FAILURES` | `1`                                  | Stop VLM attempts after repeated generic/low-quality outputs |
 | `SAFETRACE_VLM_OLLAMA_BASE_URL` | `http://127.0.0.1:11434`                      | Local Ollama vision runtime URL |
 | `SAFETRACE_VLM_MODEL`        | `local-vlm`                                      | Packaged VLM label; set to a local Ollama model only when using Ollama |
 | `SAFETRACE_FPS`              | `1.0`                                            | Frame sampling FPS               |

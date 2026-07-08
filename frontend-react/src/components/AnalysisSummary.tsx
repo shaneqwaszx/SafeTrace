@@ -12,6 +12,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import type { AnalysisResult, Severity } from '../types/analysis';
+import { isViolationAlignedWithProfile, supportLevelLabel } from '../data/useCaseProfiles';
 import { formatConfidence, formatDateTime, pluralize } from '../utils/formatters';
 import { copyJobIdToClipboard, formatShortJobId } from '../utils/jobIds';
 import { SeverityBadge } from './SeverityBadge';
@@ -47,6 +48,7 @@ type SummaryModel = {
   highestSeverity?: Severity;
   strongestFinding?: KeyFinding;
   keyFindings: KeyFinding[];
+  hiddenProfileFindingCount: number;
   nextAction: string;
   samplingFps?: number;
   topK?: number;
@@ -101,6 +103,19 @@ function getBatchId(result: AnalysisResult): string | undefined {
 function numberValue(value: unknown): number | undefined {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+function formatDurationSeconds(value: unknown): string | null {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) return null;
+  const totalSeconds = Math.floor(numeric);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
 function buildKeyFindings(result: AnalysisResult): KeyFinding[] {
@@ -178,7 +193,12 @@ function buildKeyFindings(result: AnalysisResult): KeyFinding[] {
 }
 
 function buildSummaryModel(result: AnalysisResult): SummaryModel {
-  const keyFindings = buildKeyFindings(result);
+  const useCaseProfile = result.settings?.useCaseProfile ?? result.media.useCaseProfile;
+  const allKeyFindings = buildKeyFindings(result);
+  const keyFindings = useCaseProfile
+    ? allKeyFindings.filter((finding) => isViolationAlignedWithProfile(useCaseProfile, finding.name || finding.id))
+    : allKeyFindings;
+  const hiddenProfileFindingCount = allKeyFindings.length - keyFindings.length;
   const framesWithViolations = result.summary?.framesWithViolations
     ?? result.frames.filter((frame) => frame.violations.length > 0).length;
   const framesWithoutViolations = Math.max(result.framesAnalyzed - framesWithViolations, 0);
@@ -223,6 +243,7 @@ function buildSummaryModel(result: AnalysisResult): SummaryModel {
     highestSeverity,
     strongestFinding,
     keyFindings,
+    hiddenProfileFindingCount,
     nextAction,
     samplingFps: result.settings?.fps ?? numberValue(getTechnicalValue(result, 'fps')),
     topK: result.settings?.topK,
@@ -236,6 +257,9 @@ export function AnalysisSummary({ result, showExplanations }: AnalysisSummaryPro
   const hasViolations = summary.keyFindings.length > 0;
   const jobId = result.jobId;
   const shortJobId = formatShortJobId(jobId);
+  const useCaseProfile = result.settings?.useCaseProfile ?? result.media.useCaseProfile;
+  const completedDuration = formatDurationSeconds(result.elapsedSeconds ?? getTechnicalValue(result, 'elapsedSeconds'));
+  const analysisRuntime = formatDurationSeconds(result.analysisRuntimeSeconds ?? getTechnicalValue(result, 'analysisRuntimeSeconds'));
   const evidenceHref = summary.strongestFinding?.firstFrameId
     ? `#frame-${summary.strongestFinding.firstFrameId}`
     : '#evidence-frames';
@@ -259,6 +283,29 @@ export function AnalysisSummary({ result, showExplanations }: AnalysisSummaryPro
           {showExplanations && result.summaryText ? (
             <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm leading-6 text-blue-900">
               Explanation generated from available visual evidence. {result.summaryText}
+            </div>
+          ) : null}
+          {useCaseProfile ? (
+            <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-700">
+              <span className="font-semibold uppercase text-slate-500">Use-case profile</span>
+              <span className="ml-2 font-semibold text-slate-900">{useCaseProfile.label}</span>
+              <span className="ml-2 text-slate-500">{useCaseProfile.category}</span>
+              <span className="ml-2 rounded-full border border-slate-200 bg-white px-2 py-0.5 font-semibold uppercase text-slate-500">
+                {supportLevelLabel(useCaseProfile.backendSupportLevel)}
+              </span>
+              <p className="mt-1">{useCaseProfile.description}</p>
+              <p className="mt-1">
+                Effective query used: <span className="font-semibold text-slate-900">{useCaseProfile.effectiveQuery ?? result.query}</span>
+              </p>
+              {useCaseProfile.supportedChecks?.length ? (
+                <p className="mt-1">Intended checks: {useCaseProfile.supportedChecks.join(', ')}</p>
+              ) : null}
+              {useCaseProfile.limitations ? (
+                <p className="mt-1 text-amber-800">{useCaseProfile.limitations}</p>
+              ) : null}
+              {useCaseProfile.customText ? (
+                <p className="mt-1 font-medium text-slate-800">Policy note: {useCaseProfile.customText}</p>
+              ) : null}
             </div>
           ) : null}
           {jobId ? (
@@ -289,8 +336,10 @@ export function AnalysisSummary({ result, showExplanations }: AnalysisSummaryPro
 
       <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <SummaryMetric icon={FileVideo} label="Media analyzed" value={result.media.filename} />
+        {useCaseProfile ? <SummaryMetric icon={ListChecks} label="Use-case profile" value={useCaseProfile.label} /> : null}
         {jobId ? <SummaryMetric icon={FileVideo} label="Job ID" value={shortJobId} /> : null}
-        <SummaryMetric icon={ShieldAlert} label="Overall confidence" value={summary.confidence === null ? 'Needs review' : formatConfidence(summary.confidence)} />
+        {completedDuration ? <SummaryMetric icon={Clock3} label="Completed in" value={completedDuration} /> : null}
+        <SummaryMetric icon={ShieldAlert} label="Review confidence" value={summary.confidence === null ? 'Needs review' : formatConfidence(summary.confidence)} />
         <SummaryMetric icon={Layers3} label="Grouped events" value={String(summary.eventCount)} />
         <SummaryMetric icon={Clock3} label="Generated" value={formatDateTime(result.generatedAt)} />
       </div>
@@ -308,7 +357,7 @@ export function AnalysisSummary({ result, showExplanations }: AnalysisSummaryPro
                 <span>Events</span>
                 <span>First</span>
                 <span>Last</span>
-                <span>Confidence</span>
+                <span>Evidence strength</span>
                 <span>Frames</span>
               </div>
               {summary.keyFindings.map((finding) => (
@@ -331,9 +380,14 @@ export function AnalysisSummary({ result, showExplanations }: AnalysisSummaryPro
           ) : (
             <div className="flex items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
               <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-              No matching safety violations were detected in the selected frames.
+              No profile-aligned safety violations were detected in the selected frames.
             </div>
           )}
+          {summary.hiddenProfileFindingCount ? (
+            <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">
+              {summary.hiddenProfileFindingCount} raw backend finding{summary.hiddenProfileFindingCount === 1 ? '' : 's'} were outside the selected profile and are de-prioritized from Key findings. Review technical evidence before treating any candidate as an operational incident.
+            </p>
+          ) : null}
         </div>
 
         <div className="grid gap-4">
@@ -349,6 +403,7 @@ export function AnalysisSummary({ result, showExplanations }: AnalysisSummaryPro
               <SummaryLine label="Sampling FPS" value={summary.samplingFps ? summary.samplingFps.toFixed(1) : 'Not reported'} />
               <SummaryLine label="Top-K frame limit" value={summary.topK ? String(summary.topK) : 'Not reported'} />
               <SummaryLine label="Pooling strategy" value={summary.poolingStrategy || 'Not reported'} />
+              <SummaryLine label="Analysis runtime" value={analysisRuntime || 'Not reported'} />
             </dl>
           </div>
 
@@ -389,6 +444,8 @@ export function AnalysisSummary({ result, showExplanations }: AnalysisSummaryPro
 
       <div className="mt-4 flex flex-wrap gap-2">
         <StatusBadge label={`Query: ${result.query}`} tone="info" />
+        {useCaseProfile ? <StatusBadge label={`Profile: ${useCaseProfile.label}`} tone="info" /> : null}
+        {useCaseProfile ? <StatusBadge label={supportLevelLabel(useCaseProfile.backendSupportLevel)} tone="warning" /> : null}
         {jobId ? <StatusBadge label={`Job ${shortJobId}`} tone="neutral" /> : null}
         <StatusBadge label={pluralize(summary.violationTypeCount, 'violation type')} tone={hasViolations ? 'danger' : 'success'} />
         <StatusBadge label={`${summary.supportingFrameCount} supporting frame${summary.supportingFrameCount === 1 ? '' : 's'}`} tone="neutral" />

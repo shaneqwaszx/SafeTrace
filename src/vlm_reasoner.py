@@ -65,6 +65,16 @@ VLM_PROMPT_ECHO_PHRASES = (
     "Use 2-4 concise sentences under 90 words.",
     "Potential SafeTrace findings to inspect:",
     "Findings to inspect:",
+    "You are checking one SafeTrace evidence image for the selected safety finding.",
+    "Use only visible evidence.",
+    "If the evidence is unclear, say cannot determine.",
+    "Do not list unrelated objects.",
+    "Return exactly these four short lines:",
+    "Finding: seatbelt compliance.",
+    "Finding: helmet or PPE compliance.",
+    "Finding: phone use or distracted driving.",
+    "Look only at the image crop.",
+    "Reply with exactly:",
 )
 VLM_GENERIC_RESPONSES = {
     "unclear",
@@ -77,6 +87,12 @@ VLM_GENERIC_RESPONSES = {
     "no visible safety evidence.",
     "not enough information",
     "not enough information.",
+    "seatbelt compliance",
+    "seatbelt compliance.",
+    "helmet or ppe compliance",
+    "helmet or ppe compliance.",
+    "phone use or distracted driving",
+    "phone use or distracted driving.",
 }
 VLM_USEFUL_KEYWORDS = (
     "visible",
@@ -84,6 +100,11 @@ VLM_USEFUL_KEYWORDS = (
     "safety",
     "uncertain",
     "uncertainty",
+    "cannot determine",
+    "not visible",
+    "not worn",
+    "worn",
+    "occluded",
     "blur",
     "glare",
     "occlusion",
@@ -107,14 +128,69 @@ VLM_USEFUL_KEYWORDS = (
     "appears",
     "detected",
 )
+VLM_SAFETY_EVIDENCE_KEYWORDS = (
+    "helmet",
+    "hardhat",
+    "hard hat",
+    "seatbelt",
+    "seat belt",
+    "belt",
+    "phone",
+    "mobile",
+    "hand",
+    "hands",
+    "worker",
+    "driver",
+    "occupant",
+    "torso",
+    "vehicle safety",
+    "ppe",
+    "vest",
+    "uniform",
+    "unsafe",
+    "violation",
+    "missing",
+    "wearing",
+    "worn",
+    "not worn",
+    "cannot determine",
+    "not visible",
+    "occluded",
+)
+VLM_GENERIC_INVENTORY_RE = re.compile(
+    r"\b(?:some|several|various|many)\s+(?:objects?|items?|things?)\b|"
+    r"\bobjects?\s+on\s+(?:the\s+)?(?:table|floor|ground)\b|"
+    r"\bother\s+objects?\b",
+    re.IGNORECASE,
+)
+VLM_GENERIC_PERSON_ACTIVITY_RE = re.compile(
+    r"\b(?:a\s+)?person\s+(?:is\s+)?(?:holding|standing|sitting|walking|looking|carrying|near|beside)\b",
+    re.IGNORECASE,
+)
+VLM_GENERIC_FINDING_LABEL_RE = re.compile(
+    r"\bvisible\s+evidence\s*:\s*(?:seatbelt\s+compliance|helmet\s+or\s+ppe\s+compliance|phone\s+use\s+or\s+distracted\s+driving)\b",
+    re.IGNORECASE,
+)
+VLM_OPTION_LIST_ECHO_RE = re.compile(
+    r"\b(?:worn\s*,\s*)?not\s+visible\s*,\s*not\s+worn\s*,?\s+or\s+cannot\s+determine\b|"
+    r"\bvisible\s*,\s*not\s+visible\s*,\s*missing\s*,?\s+or\s+cannot\s+determine\b|"
+    r"\bvisible\s*,\s*not\s+visible\s*,?\s+or\s+cannot\s+determine\b|"
+    r"\blow\s*,\s*medium\s*,?\s+or\s+high\b",
+    re.IGNORECASE,
+)
 VLM_ROLE_LABEL_RE = re.compile(r"\b(?:user|assistant|system)\s*:", re.IGNORECASE)
 VLM_ARTIFACT_RE = re.compile(
     r"<\s*/?\s*[^>\s]*(?:image|img|row_|col_|global|table)[^>]*>",
     re.IGNORECASE,
 )
+VLM_PLACEHOLDER_RE = re.compile(r"<[^>\n]+>")
 VLM_ARTIFACT_LEAK_RE = re.compile(
     r"<\s*/?\s*[^>\s]*(?:image|img|row_|col_|global|table)[^>]*>|\b(?:user|assistant)\s*:",
     re.IGNORECASE,
+)
+VLM_FIELD_RE = re.compile(
+    r"\b(visible_evidence|visual_status|short_reason|confidence_hint)\s*:\s*(.*?)(?=\b(?:visible_evidence|visual_status|short_reason|confidence_hint)\s*:|$)",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -151,6 +227,18 @@ def _fallback_explanation(violations: Sequence[Violation]) -> str:
 
 def _normalize_for_quality(text: str) -> str:
     return re.sub(r"[\W_]+", " ", text.lower()).strip()
+
+
+def _contains_keyword(text: str, keywords: Sequence[str]) -> bool:
+    lowered = text.lower()
+    for keyword in keywords:
+        value = str(keyword or "").strip().lower()
+        if not value:
+            continue
+        pattern = r"(?<![a-z0-9])" + re.escape(value) + r"(?![a-z0-9])"
+        if re.search(pattern, lowered):
+            return True
+    return False
 
 
 def _strip_prompt_echoes(text: str, prompt_text: str) -> str:
@@ -200,6 +288,12 @@ def vlm_output_quality_issue(clean_text: str) -> str | None:
         return "empty output"
     if VLM_ARTIFACT_LEAK_RE.search(text):
         return "token or role-label leak"
+    if VLM_PLACEHOLDER_RE.search(text):
+        return "prompt placeholder echo"
+    if VLM_OPTION_LIST_ECHO_RE.search(text):
+        return "prompt option-list echo"
+    if VLM_GENERIC_FINDING_LABEL_RE.search(text):
+        return "generic finding label"
     normalized = _normalize_for_quality(text)
     if normalized in {_normalize_for_quality(value) for value in VLM_GENERIC_RESPONSES}:
         return "generic output"
@@ -207,8 +301,33 @@ def vlm_output_quality_issue(clean_text: str) -> str | None:
         return "too short"
     if any(phrase.lower() in text.lower() for phrase in VLM_PROMPT_ECHO_PHRASES):
         return "prompt echo"
-    if not any(keyword in text.lower() for keyword in VLM_USEFUL_KEYWORDS):
+    fields: dict[str, str] = {}
+    for name, value in VLM_FIELD_RE.findall(text):
+        cleaned_value = re.sub(
+            r"\b(?:visible_evidence|visual_status|short_reason|confidence_hint)\b\s*:?.*$",
+            "",
+            str(value),
+            flags=re.IGNORECASE,
+        )
+        fields[str(name).lower()] = re.sub(r"\s+", " ", cleaned_value).strip(" .:-").lower()
+    if fields:
+        emptyish = {"", "no", "none", "n/a", "na", "unknown", "unclear"}
+        evidence = fields.get("visible_evidence", "")
+        reason = fields.get("short_reason", "")
+        status = fields.get("visual_status", "")
+        if evidence in emptyish and reason in emptyish:
+            return "non-informative structured output"
+        if len(reason) < 8 and status in {"occluded", "unclear", "not visible", "not clear"}:
+            return "non-informative structured output"
+    if not _contains_keyword(text, VLM_USEFUL_KEYWORDS):
         return "missing visible safety detail"
+    has_safety_keyword = _contains_keyword(text, VLM_SAFETY_EVIDENCE_KEYWORDS)
+    if VLM_GENERIC_INVENTORY_RE.search(text) and not has_safety_keyword:
+        return "generic object inventory"
+    if VLM_GENERIC_PERSON_ACTIVITY_RE.search(text) and not has_safety_keyword:
+        return "generic person activity"
+    if not has_safety_keyword:
+        return "missing safety-specific detail"
     return None
 
 
@@ -310,6 +429,7 @@ def _base_details(*, mode: str, requested_provider: str) -> dict[str, Any]:
         "provider": requested_provider,
         "model": SETTINGS.vlm_model,
         "maxFrames": SETTINGS.vlm_max_frames,
+        "maxEvidenceFrames": getattr(SETTINGS, "vlm_max_evidence_frames", SETTINGS.vlm_max_frames),
         "maxTokens": SETTINGS.vlm_max_tokens,
     }
 
@@ -445,7 +565,7 @@ def vlm_status_payload(*, timeout_seconds: float = 1.5) -> dict[str, Any]:  # no
     if bool(getattr(SETTINGS, "analysis_safe_mode", False)):
         return {
             "status": "disabled",
-            "message": "Safe local mode is active. VLM is not checked or loaded; rule-based explanations remain available.",
+            "message": "Local runtime guard is active. VLM is not checked or loaded; Fast Local Analysis remains available.",
             "actionHint": "Unset SAFETRACE_ANALYSIS_SAFE_MODE to inspect or activate local VLM profiles.",
             "details": {
                 "mode": "safe_mode",
@@ -463,7 +583,7 @@ def vlm_status_payload(*, timeout_seconds: float = 1.5) -> dict[str, Any]:  # no
     if mode == "disabled":
         return {
             "status": "disabled",
-            "message": "Enhanced VLM is disabled. Rule-based explanations remain available.",
+            "message": "Enhanced VLM is disabled. Fast Local Analysis remains available.",
             "actionHint": "Set SAFETRACE_VLM_ENABLED=auto or enabled to use a local VLM.",
             "details": {
                 **base_details,
@@ -634,7 +754,13 @@ class VlmReasoner:
             self.enabled = False
             self.provider = RULE_BASED_PROVIDER
 
-    def explain_violation(self, image: np.ndarray, violations: Sequence[Violation]) -> str:
+    def explain_violation(
+        self,
+        image: np.ndarray,
+        violations: Sequence[Violation],
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> str:
         self.last_explanation_source = RULE_BASED_PROVIDER
         self.last_fallback_reason = None
         self.last_raw_vlm_text = None
@@ -645,16 +771,121 @@ class VlmReasoner:
             return _fallback_explanation(violations)
 
         if self.provider == OLLAMA_PROVIDER:
-            return self._explain_with_ollama(image, violations)
+            return self._explain_with_ollama(image, violations, context=context)
         if self.provider == LOCAL_PROVIDER:
-            return self._explain_with_transformers(image, violations)
+            return self._explain_with_transformers(image, violations, context=context)
         return _fallback_explanation(violations)
 
-    def _prompt_for(self, violations: Sequence[Violation]) -> str:
+    def _prompt_context(self, context: dict[str, Any] | None) -> str:
+        if not context:
+            return ""
+        parts: list[str] = []
+        region = context.get("imageRegion")
+        if isinstance(region, dict):
+            source = str(region.get("source") or "full_frame")
+            labels = region.get("matchedLabels")
+            label_text = ", ".join(str(label) for label in labels) if isinstance(labels, list) else ""
+            if source == "detector_crop":
+                parts.append(
+                    "Image region: detector crop around relevant safety subject"
+                    + (f" ({label_text})." if label_text else ".")
+                )
+            else:
+                reason = str(region.get("reason") or "").replace("_", " ")
+                parts.append(f"Image region: full frame{f' ({reason})' if reason else ''}.")
+        detections = context.get("detections")
+        if isinstance(detections, list) and detections:
+            summary = []
+            for item in detections[:6]:
+                if isinstance(item, dict):
+                    label = str(item.get("label") or item.get("rawLabel") or "object")
+                    confidence = item.get("confidence")
+                    if isinstance(confidence, (int, float)):
+                        summary.append(f"{label} {float(confidence):.2f}")
+                    else:
+                        summary.append(label)
+            if summary:
+                parts.append(f"Detector context: {', '.join(summary)}.")
+        analysis_context = context.get("analysisContext")
+        if isinstance(analysis_context, dict):
+            profile_label = analysis_context.get("profileLabel") or analysis_context.get("selectedUseCaseProfile")
+            effective_query = analysis_context.get("effectiveQuery") or analysis_context.get("userQuery")
+            finding = analysis_context.get("friendlyFindingName") or analysis_context.get("findingName")
+            rule_support = analysis_context.get("ruleSupport")
+            confidence_reason = analysis_context.get("confidenceReason")
+            review_level = analysis_context.get("reviewLevel")
+            if profile_label:
+                parts.append(f"Selected use-case profile: {profile_label}.")
+            if effective_query:
+                parts.append(f"User query: {effective_query}.")
+            if finding:
+                parts.append(f"Rule finding under review: {finding}.")
+            rule_bits = [
+                f"review level {review_level}" if review_level else "",
+                f"rule support {rule_support}" if rule_support else "",
+                f"confidence reason {confidence_reason}" if confidence_reason else "",
+            ]
+            rule_text = "; ".join(bit for bit in rule_bits if bit)
+            if rule_text:
+                parts.append(f"Base finding context: {rule_text}.")
+        return "\n".join(parts)
+
+    def _prompt_for(self, violations: Sequence[Violation], context: dict[str, Any] | None = None) -> str:
         profile = str(getattr(SETTINGS, "vlm_profile", "rule_based") or "rule_based").strip().lower()
-        if profile == "lightweight_256m":
-            return "Describe the visible safety evidence in this image in one short sentence."
         names = ", ".join(v.name for v in violations) or "no obvious violations"
+        context_text = self._prompt_context(context)
+        context_block = f"\n{context_text}" if context_text else ""
+        strict_intro = (
+            "Look only at the image crop. Use visible evidence only. "
+            "If the safety detail is unclear, say unclear. Do not list unrelated objects. "
+            "Do not repeat the prompt. Keep every field short. "
+            "Use the selected profile, user query, rule finding, and detector context only to focus the answer."
+        )
+        if profile in {"lightweight_256m", "lightweight_512m", "enhanced_2b", "enhanced_3b"}:
+            lowered_names = names.lower()
+            if "seatbelt" in lowered_names:
+                return (
+                    f"{strict_intro}{context_block}\n"
+                    "Focus: torso area and possible belt path.\n"
+                    "State whether a belt path is visible across the torso. If torso or belt path is occluded, say unclear.\n"
+                    "Reply with exactly:\n"
+                    "visible_evidence:\n"
+                    "visual_status:\n"
+                    "short_reason:\n"
+                    "confidence_hint:"
+                )
+            if "helmet" in lowered_names or "ppe" in lowered_names:
+                return (
+                    f"{strict_intro}{context_block}\n"
+                    "Focus: head and upper-body area.\n"
+                    "State whether the head is visible and whether a helmet or PPE is visible. If the head is not visible, say unclear.\n"
+                    "Reply with exactly:\n"
+                    "visible_evidence:\n"
+                    "visual_status:\n"
+                    "short_reason:\n"
+                    "confidence_hint:"
+                )
+            if "phone" in lowered_names or "distract" in lowered_names:
+                return (
+                    f"{strict_intro}{context_block}\n"
+                    "Focus: hand, face, and driver area.\n"
+                    "State whether a phone is visibly near a hand, face, or driver area. If active use is unclear, say unclear.\n"
+                    "Reply with exactly:\n"
+                    "visible_evidence:\n"
+                    "visual_status:\n"
+                    "short_reason:\n"
+                    "confidence_hint:"
+                )
+            return (
+                f"{strict_intro}{context_block}\n"
+                f"Finding(s): {names}.\n"
+                "State what visible safety evidence supports or weakens this finding.\n"
+                "Reply with exactly:\n"
+                "visible_evidence:\n"
+                "visual_status:\n"
+                "short_reason:\n"
+                "confidence_hint:"
+            )
         return f"{VLM_PROMPT}\nFindings to inspect: {names}."
 
     def _image_base64(self, image: np.ndarray) -> str:
@@ -670,12 +901,26 @@ class VlmReasoner:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image"},
+                        {"type": "image", "image": image},
                         {"type": "text", "text": prompt_text},
                     ],
                 }
             ]
             try:
+                try:
+                    tokenized = apply_chat_template(
+                        messages,
+                        add_generation_prompt=True,
+                        tokenize=True,
+                        return_dict=True,
+                        return_tensors="pt",
+                    )
+                    if isinstance(tokenized, dict) or (
+                        hasattr(tokenized, "to") and (hasattr(tokenized, "get") or hasattr(tokenized, "input_ids"))
+                    ):
+                        return tokenized
+                except TypeError:
+                    pass
                 try:
                     prompt = apply_chat_template(
                         messages, add_generation_prompt=True, tokenize=False
@@ -757,9 +1002,15 @@ class VlmReasoner:
             return None
         return clean_text
 
-    def _explain_with_ollama(self, image: np.ndarray, violations: Sequence[Violation]) -> str:
+    def _explain_with_ollama(
+        self,
+        image: np.ndarray,
+        violations: Sequence[Violation],
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> str:
         try:
-            prompt_text = self._prompt_for(violations)
+            prompt_text = self._prompt_for(violations, context=context)
             response = httpx.post(
                 _ollama_endpoint("/api/generate"),
                 json={
@@ -789,13 +1040,19 @@ class VlmReasoner:
             logger.warning("Ollama VLM generation failed (%s); using rule-based fallback.", exc)
         return _fallback_explanation(violations)
 
-    def _explain_with_transformers(self, image: np.ndarray, violations: Sequence[Violation]) -> str:
+    def _explain_with_transformers(
+        self,
+        image: np.ndarray,
+        violations: Sequence[Violation],
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> str:
         try:
             def generate_text():
                 import torch
 
                 pil = image if isinstance(image, Image.Image) else Image.fromarray(image)
-                prompt_text = self._prompt_for(violations)
+                prompt_text = self._prompt_for(violations, context=context)
                 inputs = self._inputs_to_device(
                     self._processor_inputs_for_image(prompt_text, pil)
                 )

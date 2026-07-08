@@ -45,15 +45,20 @@ startup costs. Packaged launchers can still enable bundled MobileSAM with
 `Lightweight VLM (256M)` is optional and can be slower than rule-based mode.
 Use it only when local image-language explanations are worth the extra runtime
 cost. SafeTrace now bounds local VLM generation with
-`SAFETRACE_VLM_TIMEOUT_SECONDS` and caps per-job VLM attempts with
-`SAFETRACE_VLM_MAX_FRAMES`; if VLM generation is slow, missing, or rejected by
-quality checks, the job should complete with rule-based explanations.
+`SAFETRACE_VLM_TIMEOUT_SECONDS`, caps per-job VLM attempts with
+`SAFETRACE_VLM_MAX_EVIDENCE_FRAMES`, and caps total VLM worker time with
+`SAFETRACE_VLM_JOB_TIMEOUT_SECONDS`; if VLM generation is slow, missing,
+times out, or is rejected by quality checks, the job should complete with
+rule-based explanations.
 
 Recommended local defaults:
 
 ```cmd
 set SAFETRACE_VLM_TIMEOUT_SECONDS=10
-set SAFETRACE_VLM_MAX_FRAMES=1
+set SAFETRACE_VLM_MAX_FRAMES=5
+set SAFETRACE_VLM_FRAME_LIMIT=5
+set SAFETRACE_VLM_MAX_EVIDENCE_FRAMES=5
+set SAFETRACE_VLM_JOB_TIMEOUT_SECONDS=0
 ```
 
 ## Progress And Timeouts

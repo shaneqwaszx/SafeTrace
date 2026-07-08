@@ -1,5 +1,6 @@
 import { Archive, Clock, Copy, FileImage, FileVideo, HardDrive, UploadCloud } from 'lucide-react';
 import type { MediaItem } from '../types/analysis';
+import { supportLevelLabel } from '../data/useCaseProfiles';
 import { copyJobIdToClipboard, formatShortJobId } from '../utils/jobIds';
 import { StatusBadge } from './StatusBadge'; // Make sure this is imported
 
@@ -53,6 +54,16 @@ export function SelectedMediaViewer({
 
   const Icon = media.type === 'video' ? FileVideo : media.type === 'image' ? FileImage : Archive;
   const resultJobId = jobId || media.selectedJobId || media.jobId;
+  const useCaseProfile = media.useCaseProfile;
+  const statusDot = media.status === 'error'
+    ? 'bg-red-500'
+    : media.status === 'queued'
+      ? 'bg-amber-500'
+      : media.status === 'processing'
+        ? 'bg-blue-500'
+        : media.status === 'draft'
+          ? 'bg-slate-400'
+          : 'bg-emerald-500';
 
   return (
     <div className="mb-6 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-soft">
@@ -68,7 +79,14 @@ export function SelectedMediaViewer({
                <Icon className="h-12 w-12 text-slate-600" />
              )
           ) : (
-             <Icon className="h-12 w-12 text-slate-600" />
+             <div className="flex max-w-[80%] flex-col items-center gap-2 text-center">
+               <Icon className="h-12 w-12 text-slate-600" />
+               {media.status === 'completed' ? (
+                 <p className="text-xs font-medium leading-5 text-slate-400">
+                   Preview unavailable after refresh; re-upload this media to preview or run analysis again.
+                 </p>
+               ) : null}
+             </div>
           )}
         </div>
 
@@ -100,7 +118,7 @@ export function SelectedMediaViewer({
               </div>
             )}
             <div className="flex items-center gap-1.5 capitalize">
-              <span className={`flex h-2 w-2 rounded-full ${media.status === 'error' ? 'bg-red-500' : 'bg-emerald-500'}`}></span>
+              <span className={`flex h-2 w-2 rounded-full ${statusDot}`}></span>
               Status: {media.status}
             </div>
           </div>
@@ -111,8 +129,29 @@ export function SelectedMediaViewer({
                 ? 'Developer preview media is not a backend analysis result.'
               : media.type === 'unknown'
                 ? 'Bulk media is ready for local backend batch analysis.'
+              : media.status === 'completed'
+                ? 'Completed result remains available. Use Run again while the original browser File is still available, or re-upload after refresh.'
               : 'Selected media is ready for local backend analysis.'}
           </div>
+
+          {useCaseProfile ? (
+            <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+              <span className="font-semibold uppercase text-slate-500">Use-case profile</span>
+              <span className="ml-2 font-semibold text-slate-900">{useCaseProfile.label}</span>
+              <span className="ml-2 rounded-full border border-slate-200 bg-white px-2 py-0.5 font-semibold uppercase text-slate-500">
+                {supportLevelLabel(useCaseProfile.backendSupportLevel)}
+              </span>
+              <p className="mt-1 leading-5">{useCaseProfile.description}</p>
+              {media.effectiveQuery || useCaseProfile.effectiveQuery ? (
+                <p className="mt-1 leading-5">
+                  Effective query: <span className="font-semibold text-slate-900">{media.effectiveQuery ?? useCaseProfile.effectiveQuery}</span>
+                </p>
+              ) : null}
+              {useCaseProfile.limitations ? (
+                <p className="mt-1 leading-5 text-amber-800">{useCaseProfile.limitations}</p>
+              ) : null}
+            </div>
+          ) : null}
 
           {resultJobId ? (
             <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">

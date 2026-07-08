@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 from importlib import util as importlib_util
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -24,6 +25,7 @@ from src.chat_service import (
     warmup_chat_provider,
 )
 from src.config import SETTINGS
+from src.device_gateway import device_gateway_payload
 from src.vlm_reasoner import path_has_vlm_model_files, vlm_status_payload
 
 from .batches import BatchStore, BatchValidationError
@@ -62,13 +64,67 @@ PNA_REQUEST_HEADER = "access-control-request-private-network"
 PNA_RESPONSE_HEADER = "Access-Control-Allow-Private-Network"
 VLM_PROFILE_RULE_BASED = "rule_based"
 VLM_PROFILE_LIGHTWEIGHT = "lightweight_256m"
+VLM_PROFILE_LIGHTWEIGHT_512M = "lightweight_512m"
 VLM_PROFILE_ENHANCED = "enhanced_2b"
-VLM_PROFILE_IDS = {VLM_PROFILE_RULE_BASED, VLM_PROFILE_LIGHTWEIGHT, VLM_PROFILE_ENHANCED}
-VLM_PROFILE_LABELS = {
-    VLM_PROFILE_RULE_BASED: "Rule-based",
-    VLM_PROFILE_LIGHTWEIGHT: "Lightweight VLM (256M)",
-    VLM_PROFILE_ENHANCED: "Enhanced VLM (2B)",
+VLM_PROFILE_ENHANCED_3B = "enhanced_3b"
+VLM_PROFILE_IDS = {
+    VLM_PROFILE_RULE_BASED,
+    VLM_PROFILE_LIGHTWEIGHT,
+    VLM_PROFILE_LIGHTWEIGHT_512M,
+    VLM_PROFILE_ENHANCED,
+    VLM_PROFILE_ENHANCED_3B,
 }
+VLM_LIGHTWEIGHT_PROFILES = {VLM_PROFILE_LIGHTWEIGHT, VLM_PROFILE_LIGHTWEIGHT_512M}
+VLM_PROFILE_LABELS = {
+    VLM_PROFILE_RULE_BASED: "Fast Local Analysis",
+    VLM_PROFILE_LIGHTWEIGHT: "Local VLM Assist",
+    VLM_PROFILE_LIGHTWEIGHT_512M: "Local VLM Assist",
+    VLM_PROFILE_ENHANCED: "Advanced GPU VLM Assist",
+    VLM_PROFILE_ENHANCED_3B: "Advanced GPU VLM Assist",
+}
+VLM_PROFILE_METADATA = {
+    VLM_PROFILE_RULE_BASED: {
+        "resourceLevel": "lowest",
+        "statusCopy": "Stable default. Always available and does not require a VLM model package.",
+    },
+    VLM_PROFILE_LIGHTWEIGHT: {
+        "resourceLevel": "low",
+        "fallback": True,
+        "statusCopy": (
+            "Low-resource 256M verifier fallback layer. Base findings run first; "
+            "256M only refines wording/uncertainty when 512M is unavailable or unsuitable."
+        ),
+    },
+    VLM_PROFILE_LIGHTWEIGHT_512M: {
+        "resourceLevel": "medium",
+        "candidate": True,
+        "statusCopy": "512M lightweight verifier layer. Base findings run first; VLM only checks selected evidence frames.",
+    },
+    VLM_PROFILE_ENHANCED: {
+        "resourceLevel": "gpu_high",
+        "candidate": True,
+        "requiresGpu": True,
+        "statusCopy": (
+            "Enhanced 2B GPU verifier/explanation layer. It runs after rule-based and lightweight "
+            "verification and is unavailable without a PyTorch CUDA runtime."
+        ),
+    },
+    VLM_PROFILE_ENHANCED_3B: {
+        "resourceLevel": "very_high",
+        "candidate": True,
+        "statusCopy": "Enhanced 3B VLM candidate for selected/internal builds.",
+    },
+}
+
+
+def _vlm_frame_limit() -> int:
+    modern_limit = int(getattr(SETTINGS, "vlm_max_evidence_frames", 5) or 0)
+    legacy_limit = int(getattr(SETTINGS, "vlm_max_frames", modern_limit) or 0)
+    modern_limit = max(0, modern_limit)
+    legacy_limit = max(0, legacy_limit)
+    if legacy_limit != modern_limit:
+        return min(legacy_limit, modern_limit)
+    return modern_limit
 
 
 def _split_origins(raw: str) -> tuple[str, ...]:
@@ -223,7 +279,7 @@ def _safe_mode_lightweight_vlm_worker_allowed(profile: str | None = None, enable
         _analysis_safe_mode()
         and _lightweight_vlm_worker_enabled()
         and active_requested
-        and selected == VLM_PROFILE_LIGHTWEIGHT
+        and selected in {*VLM_LIGHTWEIGHT_PROFILES, VLM_PROFILE_ENHANCED}
         and _vlm_enabled_mode() != "disabled"
     )
 
@@ -258,12 +314,19 @@ def _initial_vlm_enabled(profile: str) -> bool:
 def _profile_path(profile: str) -> Path | None:
     if profile == VLM_PROFILE_LIGHTWEIGHT:
         return _resolve_configured_path(Path(SETTINGS.vlm_lightweight_model_path))
+    if profile == VLM_PROFILE_LIGHTWEIGHT_512M:
+        return _resolve_configured_path(Path(SETTINGS.vlm_lightweight_512m_model_path))
     if profile == VLM_PROFILE_ENHANCED:
         return _resolve_configured_path(Path(SETTINGS.vlm_enhanced_model_path))
+    if profile == VLM_PROFILE_ENHANCED_3B:
+        return _resolve_configured_path(Path(SETTINGS.vlm_enhanced_3b_model_path))
     return None
 
 
 def _vlm_profile_status(profile: str, *, runtime_available: bool) -> dict:
+    metadata = VLM_PROFILE_METADATA.get(profile, {})
+    gateway = device_gateway_payload(SETTINGS)
+    enhanced_decision = gateway.get("components", {}).get("enhancedVlm", {})
     if profile == VLM_PROFILE_RULE_BASED:
         return {
             "id": VLM_PROFILE_RULE_BASED,
@@ -271,28 +334,42 @@ def _vlm_profile_status(profile: str, *, runtime_available: bool) -> dict:
             "installed": True,
             "available": True,
             "requiresActivation": False,
-            "resourceLevel": "lowest",
+            "resourceLevel": metadata.get("resourceLevel", "lowest"),
             "path": None,
-            "message": "Rule-based explanations are always available.",
+            "message": metadata.get("statusCopy", "Fast Local Analysis is always available."),
+            "statusCopy": metadata.get("statusCopy"),
         }
 
     path = _profile_path(profile)
     installed = bool(path and _path_has_model_contents(path))
+    requires_gpu = bool(metadata.get("requiresGpu", False))
+    gpu_ready = bool(enhanced_decision.get("available")) if requires_gpu else True
+    missing_message = metadata.get("statusCopy") or "VLM profile assets are not installed."
+    if installed and runtime_available and gpu_ready:
+        message = metadata.get("statusCopy") or "VLM profile is installed and available."
+    elif installed and runtime_available and requires_gpu and not gpu_ready:
+        message = str(enhanced_decision.get("reason") or "GPU runtime is required for this VLM layer.")
+    elif installed:
+        message = "VLM profile is installed, but the transformers runtime is unavailable."
+    else:
+        message = missing_message
     return {
         "id": profile,
         "label": VLM_PROFILE_LABELS[profile],
         "installed": installed,
-        "available": installed and runtime_available,
+        "available": installed and runtime_available and gpu_ready,
         "requiresActivation": True,
-        "resourceLevel": "low" if profile == VLM_PROFILE_LIGHTWEIGHT else "high",
+        "resourceLevel": metadata.get("resourceLevel", "low" if profile in VLM_LIGHTWEIGHT_PROFILES else "high"),
         "path": _display_path(path) if path else None,
-        "message": (
-            "VLM profile is installed and available."
-            if installed and runtime_available
-            else "VLM profile is installed, but the transformers runtime is unavailable."
-            if installed
-            else "VLM profile assets are not installed."
-        ),
+        "message": message,
+        "statusCopy": metadata.get("statusCopy"),
+        "deprecated": bool(metadata.get("deprecated", False)),
+        "notViable": bool(metadata.get("notViable", False)),
+        "candidate": bool(metadata.get("candidate", False)),
+        "legacy": bool(metadata.get("legacy", False)),
+        "fallback": bool(metadata.get("fallback", False)),
+        "requiresGpu": requires_gpu,
+        "deviceDecision": enhanced_decision if requires_gpu else gateway.get("components", {}).get("lightweightVlm"),
     }
 
 
@@ -307,43 +384,40 @@ def _vlm_settings_from_state(app: FastAPI | None = None) -> tuple[str, bool]:
     return selected_profile, enabled
 
 
+def _vlm_profile_available(profile: str) -> bool:
+    return bool(_vlm_profile_status(profile, runtime_available=_vlm_runtime_available()).get("available"))
+
+
 def _vlm_profiles_payload(*, selected_profile: str, enabled: bool) -> dict:
     suppressed_reason = _vlm_suppressed_reason(selected_profile, enabled)
     lightweight_worker_allowed = _safe_mode_lightweight_vlm_worker_allowed(selected_profile, enabled)
     if suppressed_reason == "safe_mode":
         mobile_sam_allowed = _safe_mode_allow_mobile_sam()
-        profiles = [
-            {
-                "id": VLM_PROFILE_RULE_BASED,
-                "label": VLM_PROFILE_LABELS[VLM_PROFILE_RULE_BASED],
-                "installed": True,
-                "available": True,
-                "requiresActivation": False,
-                "resourceLevel": "lowest",
-                "path": None,
-                "message": "Rule-based explanations are active in safe local mode.",
-            },
-            {
-                "id": VLM_PROFILE_LIGHTWEIGHT,
-                "label": VLM_PROFILE_LABELS[VLM_PROFILE_LIGHTWEIGHT],
-                "installed": False,
-                "available": False,
-                "requiresActivation": True,
-                "resourceLevel": "low",
-                "path": None,
-                "message": "Not checked in safe local mode.",
-            },
-            {
-                "id": VLM_PROFILE_ENHANCED,
-                "label": VLM_PROFILE_LABELS[VLM_PROFILE_ENHANCED],
-                "installed": False,
-                "available": False,
-                "requiresActivation": True,
-                "resourceLevel": "high",
-                "path": None,
-                "message": "Not checked in safe local mode.",
-            },
-        ]
+        runtime_available = False
+        profiles = []
+        gateway = device_gateway_payload(SETTINGS)
+        for profile_id in VLM_PROFILE_LABELS:
+            metadata = VLM_PROFILE_METADATA.get(profile_id, {})
+            if profile_id == VLM_PROFILE_RULE_BASED:
+                profiles.append(
+                    {
+                        "id": VLM_PROFILE_RULE_BASED,
+                        "label": VLM_PROFILE_LABELS[VLM_PROFILE_RULE_BASED],
+                        "installed": True,
+                        "available": True,
+                        "requiresActivation": False,
+                        "resourceLevel": metadata.get("resourceLevel", "lowest"),
+                        "path": None,
+                        "message": "Fast Local Analysis is available in the local runtime guard.",
+                        "statusCopy": metadata.get("statusCopy"),
+                    }
+                )
+                continue
+            profile_status = _vlm_profile_status(profile_id, runtime_available=runtime_available)
+            profile_status["available"] = False
+            if profile_status.get("installed") and profile_status.get("statusCopy"):
+                profile_status["message"] = profile_status["statusCopy"]
+            profiles.append(profile_status)
         return {
             "selectedProfile": selected_profile,
             "enabled": False,
@@ -351,16 +425,16 @@ def _vlm_profiles_payload(*, selected_profile: str, enabled: bool) -> dict:
             "runtimeAvailable": False,
             "profiles": profiles,
             "message": (
-                "Safe local mode active. Rule-based explanations only; VLM is disabled. "
-                "Experimental MobileSAM may refine selected evidence frames."
+                "Local runtime guard active. Fast Local Analysis remains available; "
+                "MobileSAM may refine selected evidence frames."
                 if mobile_sam_allowed
-                else "Safe local mode active. Rule-based explanations only; VLM/MobileSAM are disabled for stability."
+                else "Local runtime guard active. Fast Local Analysis remains available."
             ),
             "requestedVisualExplanationMode": selected_profile,
             "actualExplanationMode": "rule_based_with_mobilesam" if mobile_sam_allowed else VLM_PROFILE_RULE_BASED,
             "vlmAvailability": "disabled",
             "vlmSuppressedReason": "safe_mode",
-            "fallbackReason": "Safe local mode suppresses VLM.",
+            "fallbackReason": "Local runtime guard suppresses VLM.",
             "lightweightModelPathChecked": None,
             "ruleBasedFallbackActive": True,
             "ruleBasedFallbackAvailable": True,
@@ -370,19 +444,27 @@ def _vlm_profiles_payload(*, selected_profile: str, enabled: bool) -> dict:
                 getattr(SETTINGS, "lightweight_vlm_worker_timeout_seconds", 60.0) or 60.0
             ),
             "lightweightVlmExplanationSource": "disabled",
+            "lightweightVlmEvidenceBudget": _vlm_frame_limit(),
+            "lightweightVlmFrameLimit": _vlm_frame_limit(),
+            "lightweightVlmJobTimeoutSeconds": float(getattr(SETTINGS, "vlm_job_timeout_seconds", 0.0) or 0.0),
+            "lightweightVlmMaxQualityFailures": int(getattr(SETTINGS, "vlm_max_quality_failures", 1) or 0),
+            "lightweightVlmPrimaryPolicy": str(getattr(SETTINGS, "lightweight_vlm_primary", "auto") or "auto"),
+            "lightweightVlmFallbackPolicy": str(getattr(SETTINGS, "lightweight_vlm_fallback", "256m") or "256m"),
+            "lightweightVlmCpuPrefer256m": bool(getattr(SETTINGS, "lightweight_vlm_cpu_prefer_256m", True)),
+            "enhancedVlmRequiresGpu": True,
+            "deviceGateway": gateway,
         }
 
     runtime_available = _vlm_runtime_available()
     profiles = [
-        _vlm_profile_status(VLM_PROFILE_RULE_BASED, runtime_available=runtime_available),
-        _vlm_profile_status(VLM_PROFILE_LIGHTWEIGHT, runtime_available=runtime_available),
-        _vlm_profile_status(VLM_PROFILE_ENHANCED, runtime_available=runtime_available),
+        _vlm_profile_status(profile_id, runtime_available=runtime_available)
+        for profile_id in VLM_PROFILE_LABELS
     ]
     profile_by_id = {profile["id"]: profile for profile in profiles}
     selected = profile_by_id.get(selected_profile, profile_by_id[VLM_PROFILE_RULE_BASED])
     hard_disabled = _vlm_hard_disabled(selected_profile, enabled)
     active = bool(not hard_disabled and selected_profile != VLM_PROFILE_RULE_BASED and enabled and selected["available"])
-    lightweight_path = _profile_path(VLM_PROFILE_LIGHTWEIGHT)
+    lightweight_path = _profile_path(selected_profile) if selected_profile in VLM_LIGHTWEIGHT_PROFILES else _profile_path(VLM_PROFILE_LIGHTWEIGHT_512M)
     actual_mode = selected_profile if active else VLM_PROFILE_RULE_BASED
     vlm_availability = (
         "disabled"
@@ -397,27 +479,27 @@ def _vlm_profiles_payload(*, selected_profile: str, enabled: bool) -> dict:
     )
     fallback_reason = None
     if hard_disabled:
-        message = "VLM is disabled by configuration. Rule-based explanations remain active."
+        message = "Local visual review is disabled by configuration. Fast Local Analysis remains available."
         fallback_reason = "VLM is disabled by SAFETRACE_VLM_ENABLED."
     elif selected_profile == VLM_PROFILE_RULE_BASED:
-        message = "Rule-based explanations remain active."
-        fallback_reason = "Rule-based mode is selected."
+        message = "Fast Local Analysis is active."
+        fallback_reason = "Fast Local Analysis is selected."
     elif enabled and not selected["available"]:
-        message = f"{selected['label']} is unavailable. Rule-based explanations remain active."
+        message = f"{selected['label']} is unavailable. Fast Local Analysis remains available."
         fallback_reason = selected.get("message") or f"{selected['label']} is unavailable."
     elif active and lightweight_worker_allowed:
         message = (
-            "Experimental: Lightweight VLM worker selected for evidence explanations. "
-            "Rule-based fallback remains active if the worker fails or times out."
+            "Local VLM Assist is selected for evidence explanations. "
+            "Fast Local Analysis remains available if local visual review fails or times out."
         )
     elif active:
         message = (
-            f"{selected['label']} selected for the next analysis. Evidence cards only show VLM "
-            "when generation succeeds; otherwise rule-based fallback is used."
+            f"{selected['label']} selected for the next analysis. Evidence cards show local visual review "
+            "only when it adds reliable evidence."
         )
     else:
         message = f"{selected['label']} available but inactive." if selected["available"] else (
-            f"{selected['label']} not installed. Rule-based explanations remain active."
+            f"{selected['label']} is unavailable/not installed. Fast Local Analysis remains available."
         )
         fallback_reason = "VLM activation is off." if selected["available"] else selected.get("message")
     return {
@@ -440,6 +522,15 @@ def _vlm_profiles_payload(*, selected_profile: str, enabled: bool) -> dict:
             getattr(SETTINGS, "lightweight_vlm_worker_timeout_seconds", 60.0) or 60.0
         ),
         "lightweightVlmExplanationSource": "worker" if lightweight_worker_allowed and active else "rule_based",
+        "lightweightVlmEvidenceBudget": _vlm_frame_limit(),
+        "lightweightVlmFrameLimit": _vlm_frame_limit(),
+        "lightweightVlmJobTimeoutSeconds": float(getattr(SETTINGS, "vlm_job_timeout_seconds", 0.0) or 0.0),
+        "lightweightVlmMaxQualityFailures": int(getattr(SETTINGS, "vlm_max_quality_failures", 1) or 0),
+        "lightweightVlmPrimaryPolicy": str(getattr(SETTINGS, "lightweight_vlm_primary", "auto") or "auto"),
+        "lightweightVlmFallbackPolicy": str(getattr(SETTINGS, "lightweight_vlm_fallback", "256m") or "256m"),
+        "lightweightVlmCpuPrefer256m": bool(getattr(SETTINGS, "lightweight_vlm_cpu_prefer_256m", True)),
+        "enhancedVlmRequiresGpu": True,
+        "deviceGateway": device_gateway_payload(SETTINGS),
     }
 
 
@@ -450,12 +541,6 @@ def _current_vlm_payload(app: FastAPI | None = None) -> dict:
 
 def _vlm_model_status_for_payload(vlm_payload: dict) -> ModelStatus:
     selected_profile = _normalized_vlm_profile(str(vlm_payload.get("selectedProfile") or VLM_PROFILE_RULE_BASED))
-    if _vlm_hard_disabled(selected_profile, bool(vlm_payload.get("enabled"))):
-        return ModelStatus(**vlm_status_payload())
-
-    if selected_profile == VLM_PROFILE_RULE_BASED:
-        return ModelStatus(**vlm_status_payload())
-
     profiles = {str(profile.get("id")): profile for profile in list(vlm_payload.get("profiles") or [])}
     selected = profiles.get(selected_profile) or {}
     label = str(selected.get("label") or VLM_PROFILE_LABELS[selected_profile])
@@ -477,7 +562,26 @@ def _vlm_model_status_for_payload(vlm_payload: dict) -> ModelStatus:
         "lightweightVlmWorkerEnabled": vlm_payload.get("lightweightVlmWorkerEnabled"),
         "lightweightVlmWorkerTimeoutSeconds": vlm_payload.get("lightweightVlmWorkerTimeoutSeconds"),
         "lightweightVlmExplanationSource": vlm_payload.get("lightweightVlmExplanationSource"),
+        "lightweightVlmEvidenceBudget": vlm_payload.get("lightweightVlmEvidenceBudget"),
+        "lightweightVlmFrameLimit": vlm_payload.get("lightweightVlmFrameLimit"),
+        "lightweightVlmJobTimeoutSeconds": vlm_payload.get("lightweightVlmJobTimeoutSeconds"),
+        "lightweightVlmMaxQualityFailures": vlm_payload.get("lightweightVlmMaxQualityFailures"),
+        "lightweightVlmPrimaryPolicy": vlm_payload.get("lightweightVlmPrimaryPolicy"),
+        "lightweightVlmFallbackPolicy": vlm_payload.get("lightweightVlmFallbackPolicy"),
+        "lightweightVlmCpuPrefer256m": vlm_payload.get("lightweightVlmCpuPrefer256m"),
+        "enhancedVlmRequiresGpu": vlm_payload.get("enhancedVlmRequiresGpu"),
+        "deviceGateway": vlm_payload.get("deviceGateway"),
     }
+    if _vlm_hard_disabled(selected_profile, bool(vlm_payload.get("enabled"))):
+        payload = vlm_status_payload()
+        payload["details"] = {**details, **dict(payload.get("details") or {})}
+        return ModelStatus(**payload)
+
+    if selected_profile == VLM_PROFILE_RULE_BASED:
+        payload = vlm_status_payload()
+        payload["details"] = {**details, **dict(payload.get("details") or {})}
+        return ModelStatus(**payload)
+
     if bool(vlm_payload.get("active")):
         return ModelStatus(
             status="available",
@@ -496,7 +600,7 @@ def _vlm_model_status_for_payload(vlm_payload: dict) -> ModelStatus:
     return ModelStatus(
         status="unavailable",
         path=_display_path(path) if path else None,
-        message=f"{label} is not active. Rule-based explanations remain available.",
+        message=f"{label} is not active. Fast Local Analysis remains available.",
         actionHint="Install the selected local VLM assets and activate VLM only when needed.",
         details=details,
     )
@@ -511,21 +615,28 @@ def _analysis_settings_from_request(
     device: str,
     vlm_profile: Optional[str],
     vlm_enabled: Optional[bool],
+    use_case_profile: Optional[dict[str, Any]] = None,
 ) -> AnalysisSettings:
     selected_profile, configured_enabled = _vlm_settings_from_state(app)
     requested_profile = _normalized_vlm_profile(vlm_profile or selected_profile)
     safe_mode = _analysis_safe_mode()
     requested_activation = configured_enabled if vlm_enabled is None else bool(vlm_enabled)
     worker_allowed = _safe_mode_lightweight_vlm_worker_allowed(requested_profile, requested_activation)
+    hard_disabled = _vlm_hard_disabled(requested_profile, requested_activation)
+    requested_available = (
+        requested_profile == VLM_PROFILE_RULE_BASED
+        or (not hard_disabled and _vlm_profile_available(requested_profile))
+    )
     requested_activation = bool(
-        (not safe_mode or worker_allowed)
-        and not _vlm_hard_disabled(requested_profile, requested_activation)
+        requested_available
+        and (not safe_mode or worker_allowed)
+        and not hard_disabled
         and requested_activation
         and requested_profile != VLM_PROFILE_RULE_BASED
     )
     effective_vlm_enabled = bool(
         (not safe_mode or worker_allowed)
-        and not _vlm_hard_disabled(requested_profile, requested_activation)
+        and not hard_disabled
         and enable_vlm
         and requested_activation
     )
@@ -537,7 +648,50 @@ def _analysis_settings_from_request(
         vlm_profile=requested_profile,
         vlm_enabled=requested_activation,
         safe_mode=safe_mode,
+        use_case_profile=dict(use_case_profile or {}),
     )
+
+
+def _limited_string(value: Any, limit: int = 500) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def _limited_string_list(value: Any, *, limit: int = 8) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [_limited_string(item, 160) for item in value[:limit] if _limited_string(item, 160)]
+
+
+def _parse_use_case_profile(raw: Optional[str]) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    profile_id = _limited_string(parsed.get("profileId"), 80)
+    label = _limited_string(parsed.get("label"), 120)
+    if not profile_id or not label:
+        return {}
+    return {
+        "profileId": profile_id,
+        "label": label,
+        "category": _limited_string(parsed.get("category"), 120),
+        "description": _limited_string(parsed.get("description"), 500),
+        "defaultQuery": _limited_string(parsed.get("defaultQuery"), 300),
+        "backendSupportLevel": _limited_string(parsed.get("backendSupportLevel"), 80),
+        "supportedChecks": _limited_string_list(parsed.get("supportedChecks")),
+        "unsupportedChecks": _limited_string_list(parsed.get("unsupportedChecks")),
+        "limitations": _limited_string(parsed.get("limitations"), 500),
+        "checks": _limited_string_list(parsed.get("checks")),
+        "rules": _limited_string_list(parsed.get("rules")),
+        "notes": _limited_string(parsed.get("notes"), 500),
+        "customText": _limited_string(parsed.get("customText"), 500),
+        "requestedQuery": _limited_string(parsed.get("requestedQuery"), 300),
+        "effectiveQuery": _limited_string(parsed.get("effectiveQuery"), 300),
+    }
 
 
 def _mobile_sam_runtime_available() -> bool:
@@ -551,6 +705,8 @@ def _vlm_runtime_available() -> bool:
 def _mobile_sam_status() -> ModelStatus:
     checkpoint = SETTINGS.mobile_sam_checkpoint
     display = _display_path(checkpoint)
+    gateway = device_gateway_payload(SETTINGS)
+    mobile_sam_device = gateway.get("components", {}).get("mobileSam", {})
     safe_mode = _analysis_safe_mode()
     safe_mode_mobile_sam_allowed = _safe_mode_allow_mobile_sam()
     mode = (
@@ -570,6 +726,9 @@ def _mobile_sam_status() -> ModelStatus:
         "mobileSamEnabled": mode != "disabled",
         "mobileSamWorkerEnabled": bool(mode != "disabled" and _mobile_sam_worker_enabled()),
         "mobileSamWorkerTimeoutSeconds": float(getattr(SETTINGS, "mobile_sam_worker_timeout_seconds", 60.0) or 60.0),
+        "mobileSamDevice": mobile_sam_device.get("selected"),
+        "mobileSamDeviceReason": mobile_sam_device.get("reason"),
+        "deviceGatewayDecision": mobile_sam_device,
         "mobileSamRefinementSource": (
             "worker"
             if mode != "disabled" and _mobile_sam_worker_enabled()
@@ -584,7 +743,7 @@ def _mobile_sam_status() -> ModelStatus:
             status="disabled",
             path=display,
             message=(
-                "Safe local mode active. MobileSAM refinement is disabled for stability."
+                "Local runtime guard active. MobileSAM refinement is disabled."
                 if _analysis_safe_mode()
                 else "MobileSAM refinement is disabled. Detector-box evidence remains available."
             ),
@@ -613,11 +772,11 @@ def _mobile_sam_status() -> ModelStatus:
         status="available",
         path=display,
         message=(
-            "MobileSAM worker refinement enabled for selected Safe Mode evidence frames. "
+            "MobileSAM worker refinement enabled for selected evidence frames. "
             "Detector-box fallback used if the worker fails."
             if safe_mode_mobile_sam_allowed and _mobile_sam_worker_enabled()
-            else "Experimental MobileSAM refinement is available for selected Safe Mode evidence frames. "
-            "Detector-box rule-based fallback remains active."
+            else "MobileSAM refinement is available for selected evidence frames. "
+            "Detector-box fallback remains active."
             if safe_mode_mobile_sam_allowed
             else "MobileSAM refinement is available as an optional detector-box mask refinement."
         ),
@@ -734,7 +893,17 @@ def _visual_explanations_payload(vlm_status: ModelStatus) -> dict:
     actual_mode = str(details.get("actualExplanationMode") or "").strip() or (
         "vlm" if enhanced_available else "rule_based"
     )
-    source = "vlm" if actual_mode not in {"", VLM_PROFILE_RULE_BASED, "rule_based"} and enhanced_available else "rule_based"
+    selected_provider = str(details.get("selectedProvider") or "").strip().lower()
+    provider_vlm_available = selected_provider not in {"", "rule_based", VLM_PROFILE_RULE_BASED}
+    source = (
+        "vlm"
+        if enhanced_available
+        and (
+            actual_mode not in {"", VLM_PROFILE_RULE_BASED, "rule_based"}
+            or provider_vlm_available
+        )
+        else "rule_based"
+    )
     fallback_reason = details.get("fallbackReason")
     return {
         "status": "available",
@@ -742,8 +911,8 @@ def _visual_explanations_payload(vlm_status: ModelStatus) -> dict:
         "explanationSource": source,
         "enhancedVlmAvailable": enhanced_available,
         "message": (
-            "Visual explanations are enabled. Evidence cards show VLM only when a local VLM "
-            "actually generates a clean explanation; rule-based explanations remain the fallback."
+            "Visual explanations are enabled. Evidence cards show local visual review only when "
+            "a local VLM adds reliable evidence; Fast Local Analysis remains available."
         ),
         "requestedVisualExplanationMode": details.get("requestedVisualExplanationMode"),
         "actualExplanationMode": actual_mode,
@@ -753,6 +922,10 @@ def _visual_explanations_payload(vlm_status: ModelStatus) -> dict:
         "lightweightVlmWorkerEnabled": details.get("lightweightVlmWorkerEnabled"),
         "lightweightVlmWorkerTimeoutSeconds": details.get("lightweightVlmWorkerTimeoutSeconds"),
         "lightweightVlmExplanationSource": details.get("lightweightVlmExplanationSource"),
+        "lightweightVlmEvidenceBudget": details.get("lightweightVlmEvidenceBudget"),
+        "lightweightVlmFrameLimit": details.get("lightweightVlmFrameLimit"),
+        "lightweightVlmJobTimeoutSeconds": details.get("lightweightVlmJobTimeoutSeconds"),
+        "lightweightVlmMaxQualityFailures": details.get("lightweightVlmMaxQualityFailures"),
     }
 
 
@@ -774,6 +947,10 @@ def _visual_explanations_preflight_check(vlm_status: ModelStatus) -> dict:
             "lightweightVlmWorkerEnabled": payload.get("lightweightVlmWorkerEnabled"),
             "lightweightVlmWorkerTimeoutSeconds": payload.get("lightweightVlmWorkerTimeoutSeconds"),
             "lightweightVlmExplanationSource": payload.get("lightweightVlmExplanationSource"),
+            "lightweightVlmEvidenceBudget": payload.get("lightweightVlmEvidenceBudget"),
+            "lightweightVlmFrameLimit": payload.get("lightweightVlmFrameLimit"),
+            "lightweightVlmJobTimeoutSeconds": payload.get("lightweightVlmJobTimeoutSeconds"),
+            "lightweightVlmMaxQualityFailures": payload.get("lightweightVlmMaxQualityFailures"),
         },
     )
 
@@ -911,6 +1088,7 @@ def _runtime_payload(
     store: "JobStore",
     models: dict[str, ModelStatus],
     gpu_available: bool,
+    device_gateway: dict,
     chat: dict,
     openmp: dict,
 ) -> dict:
@@ -929,6 +1107,11 @@ def _runtime_payload(
         "device": {
             "configured": SETTINGS.device,
             "gpuAvailable": gpu_available,
+            "gateway": device_gateway,
+            "detector": device_gateway.get("components", {}).get("detector"),
+            "mobileSam": device_gateway.get("components", {}).get("mobileSam"),
+            "lightweightVlm": device_gateway.get("components", {}).get("lightweightVlm"),
+            "enhancedVlm": device_gateway.get("components", {}).get("enhancedVlm"),
         },
         "analysis": {
             "safeMode": _analysis_safe_mode(),
@@ -939,21 +1122,30 @@ def _runtime_payload(
             "lightweightVlmWorkerTimeoutSeconds": float(
                 getattr(SETTINGS, "lightweight_vlm_worker_timeout_seconds", 60.0) or 60.0
             ),
-            "effectiveDevice": "cpu" if _analysis_safe_mode() else SETTINGS.device,
+            "lightweightVlmEvidenceBudget": _vlm_frame_limit(),
+            "lightweightVlmFrameLimit": _vlm_frame_limit(),
+            "lightweightVlmJobTimeoutSeconds": float(getattr(SETTINGS, "vlm_job_timeout_seconds", 0.0) or 0.0),
+            "lightweightVlmMaxQualityFailures": int(getattr(SETTINGS, "vlm_max_quality_failures", 1) or 0),
+            "effectiveDevice": device_gateway.get("components", {}).get("detector", {}).get("selected", SETTINGS.device),
+            "mobileSamDevice": device_gateway.get("components", {}).get("mobileSam", {}).get("selected"),
+            "lightweightVlmDevice": device_gateway.get("components", {}).get("lightweightVlm", {}).get("selected"),
+            "enhancedVlmDevice": device_gateway.get("components", {}).get("enhancedVlm", {}).get("selected"),
             "safeModeMessage": (
-                "Experimental: MobileSAM worker + Lightweight VLM worker. Rule-based fallback active."
+                "MobileSAM worker + Local VLM Assist active. Fast Local Analysis remains available."
                 if (
                     _analysis_safe_mode()
                     and _safe_mode_allow_mobile_sam()
                     and _mobile_sam_worker_enabled()
                     and _safe_mode_lightweight_vlm_worker_allowed()
                 )
+                else "Local VLM Assist worker enabled. Fast Local Analysis remains available; MobileSAM disabled."
+                if _analysis_safe_mode() and _safe_mode_lightweight_vlm_worker_allowed()
                 else
-                "Safe local mode active. Rule-based explanations only; MobileSAM worker refinement may run on selected evidence frames."
+                "Local runtime guard active. Fast Local Analysis remains available; MobileSAM worker refinement may run on selected evidence frames."
                 if _safe_mode_allow_mobile_sam() and _mobile_sam_worker_enabled()
-                else "Safe local mode active. Rule-based explanations only; experimental MobileSAM refinement may run on selected evidence frames."
+                else "Local runtime guard active. Fast Local Analysis remains available; MobileSAM refinement may run on selected evidence frames."
                 if _safe_mode_allow_mobile_sam()
-                else "Safe local mode active. Rule-based explanations only; VLM/MobileSAM disabled for stability."
+                else "Local runtime guard active. Fast Local Analysis remains available."
                 if _analysis_safe_mode()
                 else "Standard analysis mode active."
             ),
@@ -1074,7 +1266,8 @@ def create_app(job_store: JobStore | None = None, batch_store: BatchStore | None
 
     @app.get("/api/system/status", response_model=SystemStatusResponse)
     def system_status(request: Request, store: JobStore = Depends(get_job_store)) -> SystemStatusResponse:
-        gpu_available = _gpu_available()
+        device_gateway = device_gateway_payload(SETTINGS)
+        gpu_available = bool(device_gateway.get("torch", {}).get("cuda_available"))
         vlm_profiles = _current_vlm_payload(request.app)
         models = {
             "embeddingModel": _path_status(SETTINGS.siglip_model_dir),
@@ -1099,10 +1292,13 @@ def create_app(job_store: JobStore | None = None, batch_store: BatchStore | None
             "embeddingWindowStride": SETTINGS.embedding_window_stride,
             "embeddingPoolingStrategy": SETTINGS.embedding_pooling_strategy,
             "workerConcurrency": SETTINGS.worker_concurrency,
+            "analysisConcurrency": getattr(SETTINGS, "analysis_concurrency", SETTINGS.worker_concurrency),
+            "vlmConcurrency": getattr(SETTINGS, "vlm_concurrency", 1),
             "jobRetentionHours": SETTINGS.job_retention_hours,
             "staleRunningMinutes": SETTINGS.stale_running_minutes,
             "analysisSafeMode": _analysis_safe_mode(),
             "analysisJobTimeoutSeconds": SETTINGS.analysis_job_timeout_seconds,
+            "deviceGateway": device_gateway,
         }
         chat = chat_status_payload(allow_model_load=False)
         openmp = _openmp_status()
@@ -1125,6 +1321,7 @@ def create_app(job_store: JobStore | None = None, batch_store: BatchStore | None
                 store=store,
                 models=models,
                 gpu_available=gpu_available,
+                device_gateway=device_gateway,
                 chat=chat,
                 openmp=openmp,
             ),
@@ -1135,10 +1332,12 @@ def create_app(job_store: JobStore | None = None, batch_store: BatchStore | None
     @app.post("/api/system/vlm/settings", response_model=VlmSettingsResponse)
     def update_vlm_settings(request: Request, settings: VlmSettingsRequest) -> VlmSettingsResponse:
         request.app.state.vlm_selected_profile = settings.selectedProfile
+        hard_disabled = _vlm_hard_disabled(settings.selectedProfile, bool(settings.enabled))
         request.app.state.vlm_enabled = (
             bool(settings.enabled)
             and settings.selectedProfile != VLM_PROFILE_RULE_BASED
-            and not _vlm_hard_disabled(settings.selectedProfile, bool(settings.enabled))
+            and not hard_disabled
+            and _vlm_profile_available(settings.selectedProfile)
         )
         return VlmSettingsResponse(**_current_vlm_payload(request.app))
 
@@ -1189,6 +1388,7 @@ def create_app(job_store: JobStore | None = None, batch_store: BatchStore | None
         enableVlm: bool = Form(False),
         vlmProfile: Optional[str] = Form(None),
         vlmEnabled: Optional[bool] = Form(None),
+        useCaseProfile: Optional[str] = Form(None),
         device: DeviceMode = Form("auto"),
         store: JobStore = Depends(get_job_store),
     ) -> AnalyzeResponse:
@@ -1220,6 +1420,7 @@ def create_app(job_store: JobStore | None = None, batch_store: BatchStore | None
                 device=device,
                 vlm_profile=vlmProfile,
                 vlm_enabled=vlmEnabled,
+                use_case_profile=_parse_use_case_profile(useCaseProfile),
             ),
         )
         background_tasks.add_task(execute_analysis_job, store, record.job_id)
@@ -1236,6 +1437,7 @@ def create_app(job_store: JobStore | None = None, batch_store: BatchStore | None
         enableVlm: bool = Form(False),
         vlmProfile: Optional[str] = Form(None),
         vlmEnabled: Optional[bool] = Form(None),
+        useCaseProfile: Optional[str] = Form(None),
         device: DeviceMode = Form("auto"),
         store: JobStore = Depends(get_job_store),
         batches: BatchStore = Depends(get_batch_store),
@@ -1257,6 +1459,7 @@ def create_app(job_store: JobStore | None = None, batch_store: BatchStore | None
             device=device,
             vlm_profile=vlmProfile,
             vlm_enabled=vlmEnabled,
+            use_case_profile=_parse_use_case_profile(useCaseProfile),
         )
 
         try:

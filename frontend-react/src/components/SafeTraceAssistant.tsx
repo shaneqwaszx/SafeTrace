@@ -118,8 +118,11 @@ export function SafeTraceAssistant({
   const showRestartCommands = assistantState === 'disabled';
   const statusLabel = isLimitedFallbackAvailable ? status?.fallback_label || 'Limited help' : copy.label;
   const statusMessage = isLimitedFallbackAvailable
-    ? 'SafeTrace Assistant is running in limited local help mode.'
+    ? `SafeTrace Assistant is answering from deterministic local help because ${reason || 'the packaged llama.cpp runtime is unavailable'}.`
     : copy.message;
+  const contextStatusMessage = canSubmit && !jobId
+    ? 'No selected result is attached. Ask general SafeTrace usage questions, or open a completed job for result-aware answers.'
+    : null;
   const runtimeDiagnostics = ([
     ['Backend Python', status?.python_executable],
     ['Expected .venv Python', status?.expected_venv_python],
@@ -325,6 +328,9 @@ export function SafeTraceAssistant({
             <p className="mt-2 text-sm leading-6 text-slate-600">{statusMessage}</p>
             {reason && reason !== statusMessage ? (
               <p className="mt-1 text-xs leading-5 text-slate-500">{reason}</p>
+            ) : null}
+            {contextStatusMessage ? (
+              <p className="mt-1 text-xs leading-5 text-slate-500">{contextStatusMessage}</p>
             ) : null}
             {actionHint ? (
               <p className="mt-1 text-xs font-medium leading-5 text-slate-700">{actionHint}</p>

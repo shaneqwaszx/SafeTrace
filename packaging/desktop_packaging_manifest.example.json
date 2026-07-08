@@ -12,7 +12,7 @@
     "primaryDetector": "checkpoints/yolov9c-seg.pt",
     "mobileSamCheckpoint": "checkpoints/mobile_sam.pt",
     "chatModel": "models/chat/safetrace-assistant-qwen2.5-1.5b-instruct-q4.gguf",
-    "vlmAssets": "models/vlm/lightweight-256m/",
+    "vlmAssets": null,
     "config": "config/safetrace.env",
     "data": "data/",
     "logs": "logs/"
@@ -33,7 +33,7 @@
     "primaryDetector": "checkpoints/yolov9c-seg.pt",
     "mobileSam": "checkpoints/mobile_sam.pt",
     "chat": "models/chat/safetrace-assistant-qwen2.5-1.5b-instruct-q4.gguf",
-    "vlm": "models/vlm/lightweight-256m/",
+    "vlm": null,
     "enhancedVlmPackaged": false,
     "ollamaRequired": false
   },
@@ -72,7 +72,9 @@
     "!dist/SafeTrace/checkpoints/yolov9c-seg.pt",
     "!dist/SafeTrace/checkpoints/mobile_sam.pt",
     "!dist/SafeTrace/models/chat/*.gguf",
-    "!dist/SafeTrace/models/vlm/lightweight-256m/**"
+    "!dist/SafeTrace/models/vlm/lightweight-256m/**",
+    "!dist/SafeTrace/models/vlm/lightweight-512m/**",
+    "!dist/SafeTrace/models/vlm/enhanced-3b/**"
   ],
   "package_asset_allowlist": [
     "dist/SafeTrace/checkpoints/siglip-base-patch16-224/**",
@@ -80,7 +82,9 @@
     "dist/SafeTrace/checkpoints/yolov9c-seg.pt",
     "dist/SafeTrace/checkpoints/mobile_sam.pt",
     "dist/SafeTrace/models/chat/*.gguf",
-    "dist/SafeTrace/models/vlm/lightweight-256m/**"
+    "dist/SafeTrace/models/vlm/lightweight-256m/**",
+    "dist/SafeTrace/models/vlm/lightweight-512m/**",
+    "dist/SafeTrace/models/vlm/enhanced-3b/**"
   ],
   "notes": "Generated package output belongs under dist/SafeTrace/ and must not be committed. Ollama is optional, not required for the no-extra-steps release package."
 }

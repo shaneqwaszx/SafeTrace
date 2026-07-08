@@ -9,20 +9,32 @@ import shutil
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
 from src.config import SETTINGS
+from src.engine_metrics import build_engine_metrics
 
 from .normalization import normalize_pipeline_results
 
 JobState = Literal["queued", "running", "completed", "failed", "cancelled"]
 VLM_PROFILE_RULE_BASED = "rule_based"
 VLM_PROFILE_LIGHTWEIGHT = "lightweight_256m"
+VLM_PROFILE_LIGHTWEIGHT_512M = "lightweight_512m"
 VLM_PROFILE_ENHANCED = "enhanced_2b"
-VLM_PROFILE_IDS = {VLM_PROFILE_RULE_BASED, VLM_PROFILE_LIGHTWEIGHT, VLM_PROFILE_ENHANCED}
+VLM_PROFILE_ENHANCED_3B = "enhanced_3b"
+VLM_PROFILE_IDS = {
+    VLM_PROFILE_RULE_BASED,
+    VLM_PROFILE_LIGHTWEIGHT,
+    VLM_PROFILE_LIGHTWEIGHT_512M,
+    VLM_PROFILE_ENHANCED,
+    VLM_PROFILE_ENHANCED_3B,
+}
+VLM_LIGHTWEIGHT_PROFILES = {VLM_PROFILE_LIGHTWEIGHT, VLM_PROFILE_LIGHTWEIGHT_512M}
+VLM_SAFE_MODE_WORKER_PROFILES = {*VLM_LIGHTWEIGHT_PROFILES, VLM_PROFILE_ENHANCED}
 MEDIA_EXTENSIONS = {
     ".jpg": "image",
     ".jpeg": "image",
@@ -43,8 +55,14 @@ LOCK_FILENAME = "execution.lock"
 ANALYSIS_HEARTBEAT_SECONDS = 8.0
 
 _PIPELINE_SETTINGS_LOCK = threading.Lock()
-_EXECUTION_SEMAPHORE = threading.BoundedSemaphore(max(int(SETTINGS.worker_concurrency), 1))
 logger = logging.getLogger("safetrace.api.jobs")
+_MANIFEST_LOCKS: Dict[Path, threading.RLock] = {}
+_MANIFEST_LOCKS_GUARD = threading.Lock()
+_SEMAPHORE_LOCK = threading.Lock()
+_ANALYSIS_SEMAPHORE: threading.BoundedSemaphore | None = None
+_ANALYSIS_SEMAPHORE_LIMIT: int | None = None
+_VLM_SEMAPHORE: threading.BoundedSemaphore | None = None
+_VLM_SEMAPHORE_LIMIT: int | None = None
 
 
 class UploadValidationError(ValueError):
@@ -58,6 +76,10 @@ class PipelineTimeoutError(TimeoutError):
     """Raised when an analysis job exceeds the configured backend timeout."""
 
 
+class JobManifestPersistenceError(OSError):
+    """Raised when a job manifest/result JSON file cannot be atomically replaced."""
+
+
 @dataclass
 class AnalysisSettings:
     fps: float
@@ -67,6 +89,7 @@ class AnalysisSettings:
     vlm_profile: str = VLM_PROFILE_RULE_BASED
     vlm_enabled: bool = False
     safe_mode: bool = False
+    use_case_profile: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -90,6 +113,7 @@ class JobRecord:
     error_type: Optional[str] = None
     media_files: Dict[str, Path] = field(default_factory=dict)
     metrics: Dict[str, Any] = field(default_factory=dict)
+    persistence_warning: Optional[str] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: Optional[datetime] = None
@@ -99,8 +123,43 @@ class JobRecord:
     def manifest_path(self) -> Path:
         return self.job_dir / MANIFEST_FILENAME
 
+    def timing_payload(self, *, now: Optional[datetime] = None) -> Dict[str, Any]:
+        reference = now or _utc_now()
+        end_time = self.finished_at if self.status in TERMINAL_STATES else reference
+        elapsed_anchor = self.created_at or self.started_at or reference
+        elapsed_seconds = max(0.0, (end_time - elapsed_anchor).total_seconds())
+        queue_end = self.started_at or (self.finished_at if self.status in TERMINAL_STATES else reference)
+        queue_wait_seconds = (
+            max(0.0, (queue_end - self.created_at).total_seconds())
+            if self.created_at and queue_end
+            else None
+        )
+        analysis_runtime_seconds = (
+            max(0.0, (end_time - self.started_at).total_seconds())
+            if self.started_at and end_time
+            else None
+        )
+        completed_at = self.finished_at if self.status == "completed" else None
+        failed_at = self.finished_at if self.status == "failed" else None
+        cancelled_at = self.finished_at if self.status == "cancelled" else None
+        return {
+            "createdAt": _to_iso(self.created_at),
+            "queuedAt": _to_iso(self.created_at),
+            "startedAt": _to_iso(self.started_at),
+            "finishedAt": _to_iso(self.finished_at),
+            "completedAt": _to_iso(completed_at),
+            "failedAt": _to_iso(failed_at),
+            "cancelledAt": _to_iso(cancelled_at),
+            "elapsedSeconds": round(elapsed_seconds, 3),
+            "queueWaitSeconds": round(queue_wait_seconds, 3) if queue_wait_seconds is not None else None,
+            "analysisRuntimeSeconds": (
+                round(analysis_runtime_seconds, 3) if analysis_runtime_seconds is not None else None
+            ),
+        }
+
     def status_payload(self) -> Dict[str, Any]:
         updated_at = _to_iso(self.updated_at)
+        timing = self.timing_payload()
         return {
             "jobId": self.job_id,
             "status": self.status,
@@ -112,9 +171,10 @@ class JobRecord:
             "error": self.error,
             "metrics": self.metrics,
             "componentDiagnostics": self.metrics.get("componentDiagnostics"),
+            "persistenceWarning": self.persistence_warning,
+            "manifestPersistenceWarning": self.persistence_warning,
+            **timing,
             "updatedAt": updated_at,
-            "startedAt": _to_iso(self.started_at),
-            "finishedAt": _to_iso(self.finished_at),
             "heartbeatAt": updated_at if self.status in ACTIVE_STATES else None,
         }
 
@@ -169,11 +229,49 @@ def _resolve_manifest_path(job_dir: Path, raw_path: Any, default: Path) -> Path:
     return default
 
 
-def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+def _manifest_lock(path: Path) -> threading.RLock:
+    key = path.resolve()
+    with _MANIFEST_LOCKS_GUARD:
+        lock = _MANIFEST_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _MANIFEST_LOCKS[key] = lock
+        return lock
+
+
+def _cleanup_temporary(path: Path) -> None:
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _atomic_write_json(path: Path, payload: Dict[str, Any], *, retries: int = 5, backoff_seconds: float = 0.05) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    temporary.replace(path)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp")
+    lock = _manifest_lock(path)
+    with lock:
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            last_error: PermissionError | None = None
+            for attempt in range(max(1, retries)):
+                try:
+                    os.replace(temporary, path)
+                    return
+                except PermissionError as exc:
+                    last_error = exc
+                    if attempt >= retries - 1:
+                        break
+                    time.sleep(backoff_seconds * (attempt + 1))
+            raise JobManifestPersistenceError(f"Could not replace {path} after {retries} attempts.") from last_error
+        finally:
+            _cleanup_temporary(temporary)
 
 
 def safe_filename(filename: str) -> str:
@@ -234,6 +332,7 @@ def _settings_to_manifest(settings: AnalysisSettings) -> Dict[str, Any]:
         "vlmProfile": normalize_vlm_profile(settings.vlm_profile),
         "vlmEnabled": bool(settings.vlm_enabled),
         "safeMode": bool(settings.safe_mode),
+        "useCaseProfile": dict(settings.use_case_profile or {}),
     }
 
 
@@ -246,6 +345,7 @@ def _settings_from_manifest(payload: Dict[str, Any]) -> AnalysisSettings:
         vlm_profile=normalize_vlm_profile(payload.get("vlmProfile") or payload.get("vlm_profile")),
         vlm_enabled=bool(payload.get("vlmEnabled") or payload.get("vlm_enabled") or False),
         safe_mode=bool(payload.get("safeMode") or payload.get("safe_mode") or False),
+        use_case_profile=dict(payload.get("useCaseProfile") or payload.get("use_case_profile") or {}),
     )
 
 
@@ -267,8 +367,12 @@ def resolve_vlm_profile_model_dir(profile: Any) -> Optional[Path]:
     selected = normalize_vlm_profile(profile)
     if selected == VLM_PROFILE_LIGHTWEIGHT:
         return resolve_configured_path(Path(SETTINGS.vlm_lightweight_model_path))
+    if selected == VLM_PROFILE_LIGHTWEIGHT_512M:
+        return resolve_configured_path(Path(SETTINGS.vlm_lightweight_512m_model_path))
     if selected == VLM_PROFILE_ENHANCED:
         return resolve_configured_path(Path(SETTINGS.vlm_enhanced_model_path))
+    if selected == VLM_PROFILE_ENHANCED_3B:
+        return resolve_configured_path(Path(SETTINGS.vlm_enhanced_3b_model_path))
     return None
 
 
@@ -296,8 +400,46 @@ def lightweight_vlm_worker_requested(settings: AnalysisSettings) -> bool:
         and not vlm_hard_disabled()
         and settings.enable_vlm
         and settings.vlm_enabled
-        and profile == VLM_PROFILE_LIGHTWEIGHT
+        and profile in VLM_SAFE_MODE_WORKER_PROFILES
     )
+
+
+def _safe_concurrency(value: Any, default: int = 1) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return max(1, int(default))
+
+
+def analysis_concurrency_limit() -> int:
+    return _safe_concurrency(
+        getattr(SETTINGS, "analysis_concurrency", getattr(SETTINGS, "worker_concurrency", 1)),
+        default=1,
+    )
+
+
+def vlm_concurrency_limit() -> int:
+    return _safe_concurrency(getattr(SETTINGS, "vlm_concurrency", 1), default=1)
+
+
+def _analysis_semaphore() -> threading.BoundedSemaphore:
+    global _ANALYSIS_SEMAPHORE, _ANALYSIS_SEMAPHORE_LIMIT
+    limit = analysis_concurrency_limit()
+    with _SEMAPHORE_LOCK:
+        if _ANALYSIS_SEMAPHORE is None or _ANALYSIS_SEMAPHORE_LIMIT != limit:
+            _ANALYSIS_SEMAPHORE = threading.BoundedSemaphore(limit)
+            _ANALYSIS_SEMAPHORE_LIMIT = limit
+        return _ANALYSIS_SEMAPHORE
+
+
+def _vlm_semaphore() -> threading.BoundedSemaphore:
+    global _VLM_SEMAPHORE, _VLM_SEMAPHORE_LIMIT
+    limit = vlm_concurrency_limit()
+    with _SEMAPHORE_LOCK:
+        if _VLM_SEMAPHORE is None or _VLM_SEMAPHORE_LIMIT != limit:
+            _VLM_SEMAPHORE = threading.BoundedSemaphore(limit)
+            _VLM_SEMAPHORE_LIMIT = limit
+        return _VLM_SEMAPHORE
 
 
 def should_enable_vlm(settings: AnalysisSettings) -> bool:
@@ -351,7 +493,7 @@ def _base_component_diagnostics(settings: AnalysisSettings, *, stage: str = "que
         "device": "cpu" if safe_mode else settings.device,
         "requestedVisualExplanationMode": requested_profile,
         "effectiveExplanationMode": (
-            VLM_PROFILE_LIGHTWEIGHT
+            requested_profile
             if lightweight_vlm_worker_enabled
             else
             "rule_based_with_mobilesam"
@@ -392,6 +534,23 @@ def _base_component_diagnostics(settings: AnalysisSettings, *, stage: str = "que
         "lightweightVlmCleanTextPreview": None,
         "lightweightVlmGenerationTimeoutSeconds": None,
         "lightweightVlmMaxTokens": None,
+        "lightweightVlmEvidenceBudget": int(
+            getattr(SETTINGS, "vlm_max_evidence_frames", getattr(SETTINGS, "vlm_max_frames", 5)) or 0
+        ),
+        "lightweightVlmFrameLimit": int(
+            getattr(SETTINGS, "vlm_max_evidence_frames", getattr(SETTINGS, "vlm_max_frames", 5)) or 0
+        ),
+        "vlmFrameLimit": int(
+            getattr(SETTINGS, "vlm_max_evidence_frames", getattr(SETTINGS, "vlm_max_frames", 5)) or 0
+        ),
+        "lightweightVlmJobTimeoutSeconds": float(getattr(SETTINGS, "vlm_job_timeout_seconds", 0.0) or 0.0),
+        "lightweightVlmRuntimeGuardReason": None,
+        "lightweightVlmFramesAttempted": 0,
+        "lightweightVlmFramesSucceeded": 0,
+        "lightweightVlmFramesSkipped": 0,
+        "analysisConcurrency": analysis_concurrency_limit(),
+        "vlmConcurrency": vlm_concurrency_limit(),
+        "vlmConcurrencyLimited": False,
         "safeModeMobileSamAllowed": bool(safe_mode and getattr(SETTINGS, "safe_mode_allow_mobilesam", False)),
         "mobileSamRequested": mobile_sam_requested,
         "mobileSamAttempted": False,
@@ -409,6 +568,7 @@ def _base_component_diagnostics(settings: AnalysisSettings, *, stage: str = "que
         "detectorRequested": True,
         "detectorLoaded": False,
         "detectorCheckpointUsed": _detector_checkpoint_candidate(),
+        "useCaseProfile": dict(settings.use_case_profile or {}),
         "currentPipelineStage": stage,
         "stageTimings": {},
         "lastHeartbeat": None,
@@ -598,7 +758,14 @@ class JobStore:
 
             normalized = dict(result)
             technical_details = dict(normalized.get("technicalDetails") or {})
+            job_timing = record.timing_payload(now=now)
+            normalized.update(job_timing)
             technical_details["jobMetrics"] = dict(record.metrics)
+            technical_details["jobTiming"] = job_timing
+            normalized["technicalDetails"] = technical_details
+            engine_metrics = build_engine_metrics(normalized, record.metrics)
+            technical_details["engineMetrics"] = engine_metrics
+            normalized["engineMetrics"] = engine_metrics
             normalized["technicalDetails"] = technical_details
             record.result = normalized
             record.result_path = record.job_dir / RESULT_FILENAME
@@ -608,6 +775,16 @@ class JobStore:
         with self._lock:
             record = self._jobs[job_id]
             record.media_files[filename] = path
+            record.updated_at = _utc_now()
+            self.persist_job(record)
+
+    def register_media_files(self, job_id: str, files: list[tuple[str, Path]]) -> None:
+        if not files:
+            return
+        with self._lock:
+            record = self._jobs[job_id]
+            for filename, path in files:
+                record.media_files[filename] = path
             record.updated_at = _utc_now()
             self.persist_job(record)
 
@@ -701,6 +878,11 @@ class JobStore:
 
     def persist_job(self, record: JobRecord) -> None:
         if record.result is not None:
+            if record.persistence_warning:
+                record.result["persistenceWarning"] = record.persistence_warning
+                technical_details = dict(record.result.get("technicalDetails") or {})
+                technical_details["manifestPersistenceWarning"] = record.persistence_warning
+                record.result["technicalDetails"] = technical_details
             result_path = record.result_path or (record.job_dir / RESULT_FILENAME)
             _atomic_write_json(result_path, record.result)
             record.result_path = result_path
@@ -738,8 +920,18 @@ class JobStore:
                 "mediaFiles": media_files,
             },
             "metrics": record.metrics,
+            "persistenceWarning": record.persistence_warning,
+            "manifestPersistenceWarning": record.persistence_warning,
         }
-        _atomic_write_json(record.manifest_path, manifest)
+        try:
+            _atomic_write_json(record.manifest_path, manifest)
+        except JobManifestPersistenceError as exc:
+            warning = str(exc)
+            self._record_manifest_warning(record, warning)
+            if record.manifest_path.exists():
+                logger.warning("Job manifest persistence failed for %s: %s", record.job_id, warning)
+                return
+            raise
 
     def load_job(self, job_id: str) -> Optional[JobRecord]:
         if not _is_safe_job_id(job_id):
@@ -806,6 +998,7 @@ class JobStore:
             error_type=manifest.get("errorType"),
             media_files=media_files,
             metrics=dict(manifest.get("metrics") or {}),
+            persistence_warning=manifest.get("persistenceWarning") or manifest.get("manifestPersistenceWarning"),
             created_at=_parse_datetime(manifest.get("createdAt")) or _utc_now(),
             updated_at=_parse_datetime(manifest.get("updatedAt")) or _utc_now(),
             started_at=_parse_datetime(manifest.get("startedAt")),
@@ -843,7 +1036,26 @@ class JobStore:
             metrics["errorType"] = record.error_type
         if record.error:
             metrics["errorMessage"] = record.error
+        if record.persistence_warning:
+            metrics["manifestPersistenceWarning"] = record.persistence_warning
+            diagnostics = dict(metrics.get("componentDiagnostics") or {})
+            diagnostics["manifestPersistenceWarning"] = record.persistence_warning
+            metrics["componentDiagnostics"] = diagnostics
         record.metrics = metrics
+
+    def _record_manifest_warning(self, record: JobRecord, warning: str) -> None:
+        record.persistence_warning = warning
+        metrics = dict(record.metrics)
+        metrics["manifestPersistenceWarning"] = warning
+        diagnostics = dict(metrics.get("componentDiagnostics") or {})
+        diagnostics["manifestPersistenceWarning"] = warning
+        metrics["componentDiagnostics"] = diagnostics
+        record.metrics = metrics
+        if record.result is not None:
+            record.result["persistenceWarning"] = warning
+            technical_details = dict(record.result.get("technicalDetails") or {})
+            technical_details["manifestPersistenceWarning"] = warning
+            record.result["technicalDetails"] = technical_details
 
     def _is_safe_job_dir(self, job_dir: Path) -> bool:
         root = self.root_dir.resolve()
@@ -895,6 +1107,7 @@ def run_pipeline(
     vlm_profile: str = VLM_PROFILE_RULE_BASED,
     vlm_model_dir: Optional[Path] = None,
     safe_mode: bool = False,
+    use_case_profile: Optional[Dict[str, Any]] = None,
     component_diagnostics: Optional[Dict[str, Any]] = None,
 ):
     """Run the existing SafeTrace pipeline lazily.
@@ -921,7 +1134,7 @@ def run_pipeline(
             and getattr(SETTINGS, "lightweight_vlm_worker_enabled", False)
             and not vlm_hard_disabled()
             and enable_vlm
-            and normalized_profile == VLM_PROFILE_LIGHTWEIGHT
+            and normalized_profile in VLM_SAFE_MODE_WORKER_PROFILES
         )
         SETTINGS.enable_vlm = bool(
             (
@@ -942,7 +1155,10 @@ def run_pipeline(
             if resolved_model_dir is not None:
                 SETTINGS.vlm_model_dir = resolved_model_dir
         try:
-            pipeline = SafeTracePipeline()
+            pipeline = SafeTracePipeline(
+                use_case_profile=dict(use_case_profile or {}),
+                query_context=query,
+            )
             try:
                 return pipeline.run([upload_path], query=query, fps=fps, k=top_k)
             finally:
@@ -1033,7 +1249,7 @@ def execute_analysis_job(store: JobStore, job_id: str) -> None:
         return
 
     try:
-        with _EXECUTION_SEMAPHORE:
+        with _analysis_semaphore():
             record = store.require(job_id)
             if record.status in TERMINAL_STATES:
                 return
@@ -1063,25 +1279,33 @@ def execute_analysis_job(store: JobStore, job_id: str) -> None:
                 heartbeat_thread.start()
                 vlm_profile = normalize_vlm_profile(record.settings.vlm_profile)
                 effective_vlm_enabled = should_enable_vlm(record.settings)
+                vlm_slot = _vlm_semaphore() if effective_vlm_enabled and vlm_profile != VLM_PROFILE_RULE_BASED else nullcontext()
                 component_diagnostics = _merge_component_diagnostics(
                     dict(record.metrics),
                     record.settings,
                     stage="pipeline_starting",
+                    updates={
+                        "analysisConcurrency": analysis_concurrency_limit(),
+                        "vlmConcurrency": vlm_concurrency_limit(),
+                        "vlmConcurrencyLimited": bool(effective_vlm_enabled and vlm_profile != VLM_PROFILE_RULE_BASED),
+                    },
                 )
                 try:
-                    raw_result = _run_pipeline_with_timeout(
-                        timeout_seconds=float(getattr(SETTINGS, "analysis_job_timeout_seconds", 600.0) or 0.0),
-                        component_diagnostics=component_diagnostics,
-                        upload_path=record.upload_path,
-                        query=record.query,
-                        fps=record.settings.fps,
-                        top_k=record.settings.top_k,
-                        device="cpu" if record.settings.safe_mode else record.settings.device,
-                        enable_vlm=effective_vlm_enabled,
-                        vlm_profile=vlm_profile,
-                        vlm_model_dir=resolve_vlm_profile_model_dir(vlm_profile) if effective_vlm_enabled else None,
-                        safe_mode=record.settings.safe_mode,
-                    )
+                    with vlm_slot:
+                        raw_result = _run_pipeline_with_timeout(
+                            timeout_seconds=float(getattr(SETTINGS, "analysis_job_timeout_seconds", 600.0) or 0.0),
+                            component_diagnostics=component_diagnostics,
+                            upload_path=record.upload_path,
+                            query=record.query,
+                            fps=record.settings.fps,
+                            top_k=record.settings.top_k,
+                            device="cpu" if record.settings.safe_mode else record.settings.device,
+                            enable_vlm=effective_vlm_enabled,
+                            vlm_profile=vlm_profile,
+                            vlm_model_dir=resolve_vlm_profile_model_dir(vlm_profile) if effective_vlm_enabled else None,
+                            safe_mode=record.settings.safe_mode,
+                            use_case_profile=dict(record.settings.use_case_profile or {}),
+                        )
                 finally:
                     heartbeat_stop.set()
                     heartbeat_thread.join(timeout=0.5)
@@ -1099,6 +1323,8 @@ def execute_analysis_job(store: JobStore, job_id: str) -> None:
                     current_step="Normalizing evidence report",
                     diagnostic_updates={"currentPipelineStage": "normalizing"},
                 )
+                normalization_started = time.perf_counter()
+                pending_media_files: list[tuple[str, Path]] = []
                 result = normalize_pipeline_results(
                     job_id=job_id,
                     media_name=record.original_filename,
@@ -1107,10 +1333,15 @@ def execute_analysis_job(store: JobStore, job_id: str) -> None:
                     query=record.query,
                     raw_frames=raw_result,
                     media_dir=record.output_dir,
-                    register_media=lambda filename, path: store.register_media_file(job_id, filename, path),
+                    register_media=lambda filename, path: pending_media_files.append((filename, path)),
                 )
-                result.setdefault("technicalDetails", {})["pipelineWallClockSeconds"] = time.perf_counter() - started
-                result.setdefault("technicalDetails", {})["componentDiagnostics"] = component_diagnostics
+                store.register_media_files(job_id, pending_media_files)
+                normalization_seconds = time.perf_counter() - normalization_started
+                technical_details = result.setdefault("technicalDetails", {})
+                technical_details["pipelineWallClockSeconds"] = time.perf_counter() - started
+                technical_details["normalizationWallClockSeconds"] = normalization_seconds
+                technical_details["reportGenerationWallClockSeconds"] = normalization_seconds
+                technical_details["componentDiagnostics"] = component_diagnostics
                 store.complete_job(job_id, result)
             except Exception as exc:  # pragma: no cover - exercised through API tests
                 logger.exception("SafeTrace analysis job %s failed with %s", job_id, type(exc).__name__)

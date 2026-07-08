@@ -18,12 +18,19 @@ import { VideoQueue } from './components/VideoQueue';
 import { ViolationSummary } from './components/ViolationSummary';
 import { sampleMedia } from './data/mockAnalysis';
 import {
+  buildEffectiveProfileQuery,
+  getProfileQueryConflict,
+  getUseCaseProfileDefaultQuery,
+  resolveUseCaseProfile,
+} from './data/useCaseProfiles';
+import {
   SAFETRACE_API_BASE,
   SAFETRACE_API_BASE_CANDIDATES,
   SAFETRACE_ENABLE_PREVIEW_MODE,
   SAFETRACE_REQUIRE_BACKEND,
   BackendDiscoveryError,
   checkBackendHealth,
+  deleteJob,
   discoverBackendRuntime,
   getBatchStatus,
   getActiveApiBase,
@@ -38,6 +45,7 @@ import {
 import {
   type CachedResultEntry,
   clearCachedResults,
+  clearSafeTraceResultCacheStorageKeys,
   deleteCachedResult,
   isCacheEntryStale,
   jobCacheKey,
@@ -59,7 +67,7 @@ import { formatFileSize } from './utils/formatters';
 import { copyJobIdToClipboard, formatShortJobId } from './utils/jobIds';
 import { SelectedMediaViewer } from './components/SelectedMediaViewer';
 
-const DEFAULT_QUERY = 'worker without helmet';
+const DEFAULT_QUERY = resolveUseCaseProfile().defaultQuery;
 const ANALYSIS_STEPS = [
   'Preparing selected media',
   'Sampling frames',
@@ -72,12 +80,65 @@ const SAMPLE_QUERY_BY_MEDIA_ID: Record<string, string> = {
   'media-sample-loading-bay': 'worker inside restricted loading bay',
   'media-sample-maintenance': 'worker without helmet',
 };
+
+const TERMINAL_JOB_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+
+function jobStatusToMediaStatus(status: JobStatus['status']): MediaItem['status'] {
+  if (status === 'queued') return 'queued';
+  if (status === 'running') return 'processing';
+  if (status === 'completed') return 'completed';
+  return 'error';
+}
+
+function isBatchId(value?: string | null): boolean {
+  return typeof value === 'string' && value.startsWith('batch_');
+}
+
+function isJobId(value?: string | null): boolean {
+  return typeof value === 'string' && value.startsWith('job_');
+}
+
+function isTerminalCachedJob(entry: CachedResultEntry): boolean {
+  const status = entry.jobStatus?.status ?? entry.status;
+  return Boolean(entry.result) || TERMINAL_JOB_STATUSES.has(status);
+}
+
+function collectTerminalCachedJobIds(entries: CachedResultEntry[]): string[] {
+  const jobIds = new Set<string>();
+  entries.forEach((entry) => {
+    if (!isTerminalCachedJob(entry)) return;
+    [entry.selectedJobId, entry.jobId, entry.result?.jobId].forEach((jobId) => {
+      if (typeof jobId === 'string' && isJobId(jobId)) jobIds.add(jobId);
+    });
+  });
+  return Array.from(jobIds);
+}
+
+function withEffectiveProfile(
+  profile: AnalysisSettings['useCaseProfile'],
+  requestedQuery: string,
+): AnalysisSettings['useCaseProfile'] {
+  const requested = requestedQuery.trim() || profile.defaultQuery;
+  const effective = buildEffectiveProfileQuery(profile, requested);
+  return {
+    ...resolveUseCaseProfile(profile.profileId, profile.customText ?? '', requested),
+    requestedQuery: requested,
+    effectiveQuery: effective,
+  };
+}
 const VLM_SELECTED_PROFILE_STORAGE_KEY = 'safetrace:vlm:selectedProfile';
 const VLM_ENABLED_STORAGE_KEY = 'safetrace:vlm:enabled';
-const VLM_PROFILE_IDS: VlmExplanationProfileId[] = ['rule_based', 'lightweight_256m', 'enhanced_2b'];
+const VLM_PROFILE_IDS: VlmExplanationProfileId[] = [
+  'rule_based',
+  'lightweight_256m',
+  'lightweight_512m',
+  'enhanced_2b',
+  'enhanced_3b',
+];
 const JOB_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 const BATCH_POLL_TIMEOUT_MS = 10 * 60 * 1000;
 const FRESH_BACKEND_HEARTBEAT_MS = 45 * 1000;
+const PERSIST_BROWSER_RESULT_CACHE = false;
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -107,9 +168,18 @@ function writeLocalStorageValue(key: string, value: string): void {
 
 function getInitialVlmSettings(): Pick<AnalysisSettings, 'vlmProfile' | 'vlmEnabled'> {
   const storedProfile = readLocalStorageValue(VLM_SELECTED_PROFILE_STORAGE_KEY);
-  const vlmProfile = isVlmProfileId(storedProfile) ? storedProfile : 'rule_based';
+  const staleRemovedProfile = storedProfile === 'lightweight_256m'
+    || storedProfile === 'enhanced_3b';
+  const vlmProfile = isVlmProfileId(storedProfile) && !staleRemovedProfile ? storedProfile : 'rule_based';
   const vlmEnabled = readLocalStorageValue(VLM_ENABLED_STORAGE_KEY) === 'true' && vlmProfile !== 'rule_based';
   return { vlmProfile, vlmEnabled };
+}
+
+function isMainVlmSelectorProfileAvailable(status: SystemStatus | null, profile: VlmExplanationProfileId): boolean {
+  if (profile === 'rule_based') return true;
+  if (profile !== 'lightweight_512m' && profile !== 'enhanced_2b') return false;
+  const backendProfile = status?.vlm?.profiles?.find((candidate) => candidate.id === profile);
+  return Boolean(backendProfile?.installed && backendProfile?.available);
 }
 
 function shouldRequestVlm(settings: AnalysisSettings): boolean {
@@ -130,6 +200,16 @@ function isBackendHeartbeatFresh(status: Pick<JobStatus, 'heartbeatAt' | 'update
 function isBatchUpdateFresh(status: Pick<BatchStatus, 'updatedAt'>, now = Date.now()): boolean {
   const timestamp = parseTimestampMs(status.updatedAt);
   return timestamp !== null && now - timestamp <= FRESH_BACKEND_HEARTBEAT_MS;
+}
+
+function hasUsableCachedPayload(
+  entry: CachedResultEntry,
+  entriesByKey: Record<string, CachedResultEntry>,
+): boolean {
+  if (isCacheEntryStale(entry)) return false;
+  if (entry.result) return true;
+  if (entry.selectedJobId && entriesByKey[jobCacheKey(entry.selectedJobId)]?.result) return true;
+  return false;
 }
 
 class BackendJobFailureError extends Error {
@@ -155,6 +235,19 @@ function jobFailureDebugDetails(status: JobStatus): string {
     || status.currentStep
     || 'Backend job failed without additional diagnostics.'
   );
+}
+
+function resultComponentDiagnostics(result: AnalysisResult | null): Record<string, unknown> | null {
+  if (!result?.technicalDetails || typeof result.technicalDetails !== 'object') return null;
+  const technicalDetails = result.technicalDetails as Record<string, unknown>;
+  const direct = technicalDetails.componentDiagnostics;
+  if (direct && typeof direct === 'object') return direct as Record<string, unknown>;
+  const jobMetrics = technicalDetails.jobMetrics;
+  if (jobMetrics && typeof jobMetrics === 'object') {
+    const nested = (jobMetrics as Record<string, unknown>).componentDiagnostics;
+    if (nested && typeof nested === 'object') return nested as Record<string, unknown>;
+  }
+  return null;
 }
 
 function persistVlmSettings(settings: AnalysisSettings): void {
@@ -202,12 +295,12 @@ function App() {
       vlmEnabled: vlmSettings.vlmEnabled,
       enhancedVlmExplanations: vlmSettings.vlmEnabled,
       deviceMode: 'Auto',
+      useCaseProfile: resolveUseCaseProfile(),
     };
   });
-  const [isLoading, setIsLoading] = useState(false);
+  const [activeAnalysisMediaIds, setActiveAnalysisMediaIds] = useState<Record<string, true>>({});
   const [activeStep, setActiveStep] = useState(0);
   const [highlightedFrameId, setHighlightedFrameId] = useState<string | null>(null);
-  const [localPreviewUrl, setLocalPreviewUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [errorDetails, setErrorDetails] = useState<string | null>(null);
   const [showAnnotation, setShowAnnotation] = useState(false);
@@ -227,24 +320,54 @@ function App() {
   const [activeView, setActiveView] = useState<'analysis' | 'insights'>('analysis');
   const localFilesRef = useRef<Record<string, File>>({});
   const localFileGroupsRef = useRef<Record<string, File[]>>({});
+  const objectUrlsRef = useRef<Set<string>>(new Set());
   const selectedMediaIdRef = useRef<string | null>(selectedMedia?.id ?? null);
+  const activeAnalysisMediaIdsRef = useRef<Record<string, true>>({});
 
   const backendConnected = backendState === 'connected';
   const controlsLocked = SAFETRACE_REQUIRE_BACKEND && !backendConnected && !previewMode;
   const canUsePreview = previewMode && Boolean(selectedMedia);
   const cachedEntryCount = Object.keys(cachedEntries).length;
+  const hasAnyActiveAnalysis = Object.keys(activeAnalysisMediaIds).length > 0;
+  const isLoading = Boolean(selectedMedia && activeAnalysisMediaIds[selectedMedia.id]);
 
   useEffect(() => {
     selectedMediaIdRef.current = selectedMedia?.id ?? null;
   }, [selectedMedia?.id]);
 
   useEffect(() => {
+    activeAnalysisMediaIdsRef.current = activeAnalysisMediaIds;
+  }, [activeAnalysisMediaIds]);
+
+  useEffect(() => {
     let isMounted = true;
+    if (!PERSIST_BROWSER_RESULT_CACHE) {
+      clearSafeTraceResultCacheStorageKeys();
+      clearCachedResults()
+        .catch(() => undefined)
+        .finally(() => {
+          if (isMounted) setCachedEntries({});
+        });
+      return () => {
+        isMounted = false;
+      };
+    }
     loadCachedResults()
       .then((entries) => {
         if (!isMounted) return;
-        const next = Object.fromEntries(entries.map((entry) => [entry.cacheKey, entry]));
+        const entriesByKey = Object.fromEntries(entries.map((entry) => [entry.cacheKey, entry]));
+        const usableEntries = entries.filter((entry) => hasUsableCachedPayload(entry, entriesByKey));
+        const rejectedEntries = entries.filter((entry) => !hasUsableCachedPayload(entry, entriesByKey));
+        const next = Object.fromEntries(usableEntries.map((entry) => [entry.cacheKey, entry]));
         setCachedEntries(next);
+        if (rejectedEntries.length) {
+          setCacheMessage(
+            `${rejectedEntries.length} stale or incomplete browser cache item${rejectedEntries.length === 1 ? '' : 's'} ignored.`,
+          );
+          rejectedEntries.forEach((entry) => {
+            void deleteCachedResult(entry.cacheKey).catch(() => undefined);
+          });
+        }
       })
       .catch(() => {
         if (isMounted) {
@@ -258,6 +381,7 @@ function App() {
 
   function rememberCachedEntry(entry: CachedResultEntry) {
     setCachedEntries((current) => ({ ...current, [entry.cacheKey]: entry }));
+    if (!PERSIST_BROWSER_RESULT_CACHE) return;
     void saveCachedResult(entry).then((result) => {
       if (!result.saved && result.reason) {
         setCacheMessage(result.reason);
@@ -276,9 +400,27 @@ function App() {
     ));
   }
 
+  function updateMediaItem(mediaId: string, patch: Partial<MediaItem>) {
+    setMediaLibrary((current) => current.map((item) => (
+      item.id === mediaId ? { ...item, ...patch } : item
+    )));
+    setSelectedMedia((current) => (
+      current?.id === mediaId ? { ...current, ...patch } : current
+    ));
+  }
+
+  function setMediaAnalysisActive(mediaId: string, active: boolean) {
+    setActiveAnalysisMediaIds((current) => {
+      if (active) return { ...current, [mediaId]: true };
+      const next = { ...current };
+      delete next[mediaId];
+      return next;
+    });
+  }
+
   function updateMediaJobReference(
     mediaId: string,
-    refs: Pick<MediaItem, 'jobId' | 'selectedJobId' | 'batchId'>,
+    refs: Partial<Pick<MediaItem, 'jobId' | 'selectedJobId' | 'batchId'>>,
   ) {
     setMediaLibrary((current) => current.map((item) => (
       item.id === mediaId ? { ...item, ...refs } : item
@@ -296,6 +438,7 @@ function App() {
     selectedJobId,
     source = 'backend',
     status,
+    queryText,
   }: {
     media: MediaItem;
     result?: AnalysisResult;
@@ -304,21 +447,27 @@ function App() {
     selectedJobId?: string | null;
     source?: CachedResultEntry['source'];
     status?: string;
+    queryText?: string;
   }): CachedResultEntry {
     const existing = cachedEntries[mediaCacheKey(media.id)];
+    const candidateJobId = result?.jobId ?? nextJobStatus?.jobId ?? existing?.jobId;
+    const safeJobId = isJobId(candidateJobId) ? candidateJobId : undefined;
+    const candidateSelectedJobId = selectedJobId ?? existing?.selectedJobId;
+    const safeSelectedJobId = isJobId(candidateSelectedJobId) ? candidateSelectedJobId : undefined;
+    const staleBatchId = isBatchId(existing?.jobId) ? existing?.jobId : undefined;
     return {
       cacheKey: mediaCacheKey(media.id),
       cacheVersion: 1,
       mediaId: media.id,
       mediaName: media.filename,
-      query: result?.query ?? query,
+      query: result?.query ?? queryText ?? media.effectiveQuery ?? media.requestedQuery ?? query,
       source,
       status: status ?? result?.status ?? nextBatchStatus?.status ?? nextJobStatus?.status ?? media.status,
       savedAt: existing?.savedAt ?? new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      jobId: result?.jobId ?? nextJobStatus?.jobId ?? existing?.jobId,
-      batchId: nextBatchStatus?.batchId ?? existing?.batchId,
-      selectedJobId: selectedJobId ?? existing?.selectedJobId,
+      jobId: safeJobId,
+      batchId: nextBatchStatus?.batchId ?? existing?.batchId ?? staleBatchId,
+      selectedJobId: safeSelectedJobId,
       result: result ?? existing?.result,
       jobStatus: nextJobStatus ?? existing?.jobStatus ?? null,
       batchStatus: nextBatchStatus ?? existing?.batchStatus ?? null,
@@ -330,6 +479,10 @@ function App() {
     const childEntry = entry?.selectedJobId ? cachedEntries[jobCacheKey(entry.selectedJobId)] : undefined;
     const restoredResult = childEntry?.result ?? entry?.result;
     if (!entry && !childEntry) return false;
+    if (entry && !hasUsableCachedPayload(entry, cachedEntries) && !restoredResult) {
+      setCacheMessage('Ignored an incomplete browser cache reference for this media. Reconnect the local runtime or rerun analysis.');
+      return false;
+    }
 
     setAnalysisResult(restoredResult ?? null);
     setJobStatus(childEntry?.jobStatus ?? entry?.jobStatus ?? null);
@@ -361,7 +514,17 @@ function App() {
         jobId: entry.jobId ?? entry.result.jobId ?? knownMedia.jobId,
         selectedJobId: entry.selectedJobId ?? knownMedia.selectedJobId,
         batchId: entry.batchId ?? knownMedia.batchId,
+        requestedQuery: entry.result.media.requestedQuery ?? entry.query,
+        effectiveQuery: entry.result.query,
+        useCaseProfile: entry.result.settings?.useCaseProfile ?? entry.result.media.useCaseProfile ?? knownMedia.useCaseProfile,
       });
+      if (entry.result.settings?.useCaseProfile ?? entry.result.media.useCaseProfile) {
+        setSettings((current) => ({
+          ...current,
+          useCaseProfile: entry.result?.settings?.useCaseProfile ?? entry.result?.media.useCaseProfile ?? current.useCaseProfile,
+        }));
+      }
+      setQuery(entry.result.query);
       return;
     }
     setSelectedMedia({
@@ -375,14 +538,39 @@ function App() {
       jobId: entry.jobId ?? entry.result.jobId,
       selectedJobId: entry.selectedJobId,
       batchId: entry.batchId,
+      requestedQuery: entry.result.media.requestedQuery ?? entry.query,
+      effectiveQuery: entry.result.query,
+      useCaseProfile: entry.result.settings?.useCaseProfile ?? entry.result.media.useCaseProfile,
     });
+    if (entry.result.settings?.useCaseProfile ?? entry.result.media.useCaseProfile) {
+      setSettings((current) => ({
+        ...current,
+        useCaseProfile: entry.result?.settings?.useCaseProfile ?? entry.result?.media.useCaseProfile ?? current.useCaseProfile,
+      }));
+    }
+    setQuery(entry.result.query);
   }
 
   async function refreshCachedResultFromBackend(media: MediaItem) {
     const entry = cachedEntries[mediaCacheKey(media.id)];
-    const jobId = entry?.selectedJobId ?? entry?.jobId;
-    if (!backendConnected || !jobId) return;
+    const staleBatchId = isBatchId(entry?.jobId) ? entry?.jobId : undefined;
+    const batchId = entry?.batchId ?? staleBatchId;
+    const jobId = [entry?.selectedJobId, entry?.jobId].find((candidate) => isJobId(candidate));
+    if (!backendConnected) return;
     try {
+      if (batchId && !jobId) {
+        const batch = await getBatchStatus(batchId);
+        rememberCachedEntry(buildCacheEntry({
+          media,
+          batchStatus: batch,
+          status: batch.status,
+          queryText: media.effectiveQuery ?? media.requestedQuery,
+        }));
+        updateMediaJobReference(media.id, { batchId, jobId: undefined, selectedJobId: undefined });
+        if (selectedMediaIdRef.current === media.id) setBatchStatus(batch);
+        return;
+      }
+      if (!jobId) return;
       const status = await getJobStatus(jobId);
       const nextEntry = buildCacheEntry({ media, jobStatus: status, status: status.status });
       rememberCachedEntry(nextEntry);
@@ -391,7 +579,11 @@ function App() {
       if (status.status !== 'completed') return;
 
       const result = await getJobResult(jobId);
-      result.settings = settings;
+      const resultProfile = result.settings?.useCaseProfile ?? result.media.useCaseProfile ?? media.useCaseProfile;
+      result.settings = { ...settings, useCaseProfile: resultProfile ?? settings.useCaseProfile };
+      result.media.useCaseProfile = resultProfile;
+      result.media.requestedQuery = media.requestedQuery ?? result.query;
+      result.media.effectiveQuery = result.query;
       const jobEntry: CachedResultEntry = {
         cacheKey: jobCacheKey(jobId),
         cacheVersion: 1,
@@ -408,7 +600,19 @@ function App() {
         jobStatus: status,
       };
       rememberCachedEntry(jobEntry);
-      rememberCachedEntry(buildCacheEntry({ media, result, jobStatus: status, selectedJobId: jobId, status: 'completed' }));
+      rememberCachedEntry(buildCacheEntry({
+        media: {
+          ...media,
+          useCaseProfile: resultProfile,
+          requestedQuery: media.requestedQuery ?? result.query,
+          effectiveQuery: result.query,
+        },
+        result,
+        jobStatus: status,
+        selectedJobId: jobId,
+        status: 'completed',
+        queryText: result.query,
+      }));
       if (selectedMediaIdRef.current === media.id) {
         setAnalysisResult(result);
         setAnalysisMode('backend');
@@ -456,28 +660,21 @@ function App() {
 
   useEffect(() => {
     if (!backendConnected) return;
-    const backendProfile = systemStatus?.vlm?.selectedProfile;
-    if (!isVlmProfileId(backendProfile) || backendProfile === 'rule_based' || !systemStatus?.vlm?.active) return;
-    if (settings.vlmProfile === backendProfile && settings.vlmEnabled) return;
-    const nextSettings = {
-      ...settings,
-      vlmProfile: backendProfile,
-      vlmEnabled: true,
-      enhancedVlmExplanations: true,
-    };
-    persistVlmSettings(nextSettings);
-    setSettings(nextSettings);
-  }, [backendConnected, settings, systemStatus?.vlm?.active, systemStatus?.vlm?.selectedProfile]);
-
-  useEffect(() => {
-    if (!backendConnected) return;
+    if (!isMainVlmSelectorProfileAvailable(systemStatus, settings.vlmProfile)) {
+      setSettings((current) => ({
+        ...current,
+        vlmProfile: 'rule_based',
+        vlmEnabled: false,
+      }));
+      return;
+    }
     void updateVlmSettings({
       selectedProfile: settings.vlmProfile,
       enabled: shouldRequestVlm(settings),
     }).catch(() => {
       // Older local runtimes do not expose VLM settings yet; local UI state remains authoritative.
     });
-  }, [backendConnected, settings.visualExplanations, settings.vlmEnabled, settings.vlmProfile]);
+  }, [backendConnected, settings.visualExplanations, settings.vlmEnabled, settings.vlmProfile, systemStatus]);
 
   useEffect(() => {
     if (!previewMode) return undefined;
@@ -494,21 +691,18 @@ function App() {
 
   useEffect(() => {
     return () => {
-      if (localPreviewUrl) URL.revokeObjectURL(localPreviewUrl);
+      objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      objectUrlsRef.current.clear();
     };
-  }, [localPreviewUrl]);
+  }, []);
 
-  function clearLocalPreview() {
-    if (localPreviewUrl) {
-      URL.revokeObjectURL(localPreviewUrl);
-      setLocalPreviewUrl(null);
-    }
+  function trackObjectUrl(url?: string) {
+    if (url) objectUrlsRef.current.add(url);
   }
 
   function handleSelectMedia(media: MediaItem) {
     const knownSampleQueries = Object.values(SAMPLE_QUERY_BY_MEDIA_ID);
     const suggestedQuery = SAMPLE_QUERY_BY_MEDIA_ID[media.id];
-    clearLocalPreview();
     setSelectedMedia(media);
     setActiveView('analysis');
     const fileGroup = localFileGroupsRef.current[media.id] ?? (
@@ -519,6 +713,13 @@ function App() {
     setError(null);
     setErrorDetails(null);
     setCacheMessage(null);
+    if (media.useCaseProfile) {
+      setSettings((current) => ({
+        ...current,
+        useCaseProfile: media.useCaseProfile ?? current.useCaseProfile,
+      }));
+      setQuery(media.requestedQuery ?? media.effectiveQuery ?? media.useCaseProfile.defaultQuery);
+    }
     const restored = restoreCachedMedia(media);
     if (!restored) {
       setAnalysisResult(null);
@@ -528,13 +729,21 @@ function App() {
       setAnalysisMode(null);
     }
     void refreshCachedResultFromBackend(media);
-    if (suggestedQuery && knownSampleQueries.includes(query)) {
+    if (!media.useCaseProfile && suggestedQuery && knownSampleQueries.includes(query)) {
       setQuery(suggestedQuery);
     }
   }
 
   function handleDeleteMedia(mediaId: string) {
     const entry = cachedEntries[mediaCacheKey(mediaId)];
+    const mediaToDelete = mediaLibrary.find((media) => media.id === mediaId);
+    if (mediaToDelete?.previewUrl) {
+      const stillUsedElsewhere = mediaLibrary.some((media) => media.id !== mediaId && media.previewUrl === mediaToDelete.previewUrl);
+      if (!stillUsedElsewhere) {
+        URL.revokeObjectURL(mediaToDelete.previewUrl);
+        objectUrlsRef.current.delete(mediaToDelete.previewUrl);
+      }
+    }
     delete localFilesRef.current[mediaId];
     delete localFileGroupsRef.current[mediaId];
     setCachedEntries((current) => {
@@ -564,22 +773,36 @@ function App() {
   }
 
   function handleSettingsChange(nextSettings: AnalysisSettings) {
+    const profileChanged = nextSettings.useCaseProfile.profileId !== settings.useCaseProfile.profileId;
+    const nextQuery = profileChanged ? getUseCaseProfileDefaultQuery(nextSettings.useCaseProfile) : query;
+    const nextProfile = withEffectiveProfile(nextSettings.useCaseProfile, nextQuery);
     const normalizedSettings = {
       ...nextSettings,
+      useCaseProfile: nextProfile,
       vlmEnabled: nextSettings.vlmProfile === 'rule_based' ? false : nextSettings.vlmEnabled,
       enhancedVlmExplanations: shouldRequestVlm(nextSettings),
     };
     persistVlmSettings(normalizedSettings);
     setSettings(normalizedSettings);
+    if (profileChanged) setQuery(nextQuery);
+    if (selectedMedia && !['queued', 'processing', 'completed'].includes(selectedMedia.status)) {
+      updateMediaItem(selectedMedia.id, {
+        useCaseProfile: nextProfile,
+        requestedQuery: nextProfile.requestedQuery,
+        effectiveQuery: nextProfile.effectiveQuery,
+      });
+    }
   }
 
   function handleFilesSelected(files: File[]) {
     if (controlsLocked) return;
     const selected = files.filter(Boolean);
     if (!selected.length) return;
-    clearLocalPreview();
+    const hasActiveAnalysis = Object.keys(activeAnalysisMediaIdsRef.current).length > 0;
+    const profileForDraft = withEffectiveProfile(settings.useCaseProfile, query);
     const isSinglePreviewableFile = selected.length === 1 && !isZipFile(selected[0]);
     const previewUrl = isSinglePreviewableFile ? URL.createObjectURL(selected[0]) : undefined;
+    trackObjectUrl(previewUrl);
     const id = selected.length === 1
       ? `local-${selected[0].name}-${selected[0].lastModified}`
       : `local-batch-${Date.now()}`;
@@ -589,19 +812,27 @@ function App() {
       type: getMediaTypeForFiles(selected),
       sizeLabel: getSelectionSize(selected),
       uploadedAt: new Date().toISOString(),
-      status: 'ready',
+      status: 'draft',
       source: 'local',
       previewUrl,
+      useCaseProfile: profileForDraft,
+      requestedQuery: profileForDraft.requestedQuery,
+      effectiveQuery: profileForDraft.effectiveQuery,
     };
     if (selected.length === 1) {
       localFilesRef.current[media.id] = selected[0];
     }
     localFileGroupsRef.current[media.id] = selected;
-    setLocalPreviewUrl(previewUrl ?? null);
+    setMediaLibrary((prev) => [media, ...prev.filter((item) => item.id !== media.id)]);
+    if (hasActiveAnalysis) {
+      setCacheMessage(
+        `${media.filename} was added as a draft job. The current analysis keeps running; select this item and click Send to queue it with the backend worker.`,
+      );
+      return;
+    }
     setSelectedFile(selected.length === 1 ? selected[0] : null);
     setSelectedFiles(selected);
     setSelectedMedia(media);
-    setMediaLibrary((prev) => [media, ...prev.filter((item) => item.id !== media.id)]);
     setAnalysisResult(null);
     setError(null);
     setErrorDetails(null);
@@ -651,7 +882,13 @@ function App() {
         setActiveStep(progressToStep(status.progress));
       }
       if (media) {
-        rememberCachedEntry(buildCacheEntry({ media, jobStatus: status, status: status.status }));
+        updateMediaStatus(media.id, jobStatusToMediaStatus(status.status));
+        rememberCachedEntry(buildCacheEntry({
+          media,
+          jobStatus: status,
+          status: status.status,
+          queryText: media.effectiveQuery ?? media.requestedQuery,
+        }));
       }
 
       if (status.status === 'completed') return status;
@@ -698,8 +935,17 @@ function App() {
       const completedJobs = status.acceptedFiles.filter((file) => (
         file.status === 'completed' || file.status === 'failed' || file.status === 'cancelled'
       )).length;
+      const representativeJobIdCandidate = (
+        status.acceptedFiles.find((file) => file.status === 'running')?.jobId
+        ?? status.acceptedFiles.find((file) => file.status === 'queued')?.jobId
+        ?? status.acceptedFiles.find((file) => file.status === 'completed')?.jobId
+        ?? media?.selectedJobId
+        ?? media?.jobId
+        ?? ''
+      );
+      const representativeJobId = isJobId(representativeJobIdCandidate) ? representativeJobIdCandidate : '';
       const progressStatus: JobStatus = {
-        jobId: batchId,
+        jobId: representativeJobId,
         status: status.status === 'running' ? 'running' : status.status === 'queued' ? 'queued' : 'completed',
         progress: completedJobs / totalJobs,
         progressPercent: Math.round((completedJobs / totalJobs) * 100),
@@ -713,11 +959,12 @@ function App() {
         setJobStatus(progressStatus);
       }
       if (media) {
+        updateMediaStatus(media.id, status.status === 'queued' ? 'queued' : status.status === 'running' ? 'processing' : 'completed');
         rememberCachedEntry(buildCacheEntry({
           media,
-          jobStatus: progressStatus,
           batchStatus: status,
           status: status.status,
+          queryText: media.effectiveQuery ?? media.requestedQuery,
         }));
       }
 
@@ -734,13 +981,75 @@ function App() {
   }
 
   async function handleAnalyze() {
-    const trimmedQuery = query.trim();
-    if (!trimmedQuery) {
+    const requestedQuery = query.trim() || settings.useCaseProfile.defaultQuery;
+    const profileConflict = getProfileQueryConflict(settings.useCaseProfile, requestedQuery);
+    if (profileConflict) {
+      setError(profileConflict);
+      setErrorDetails(
+        'Use-case profiles provide the analysis intent. Pick a matching profile or use the profile default query before submitting.',
+      );
+      return;
+    }
+    const profileForRequest = withEffectiveProfile(settings.useCaseProfile, requestedQuery);
+    const effectiveQuery = profileForRequest.effectiveQuery ?? requestedQuery;
+    if (!effectiveQuery.trim()) {
       setError('Enter a query before starting analysis.');
       return;
     }
 
-    setIsLoading(true);
+    const backendFiles = selectedFiles.length ? [...selectedFiles] : selectedFile ? [selectedFile] : [];
+    let activeMedia: MediaItem | null = selectedMedia
+      ? {
+        ...selectedMedia,
+        useCaseProfile: profileForRequest,
+        requestedQuery,
+        effectiveQuery,
+      }
+      : null;
+    if (activeMedia?.status === 'completed') {
+      if (!backendFiles.length) {
+        setError('Re-upload this media to run analysis again.');
+        setErrorDetails('The completed result is still available, but the browser no longer has the original File object after refresh or cleanup.');
+        return;
+      }
+      const rerunId = `${activeMedia.id}-rerun-${Date.now()}`;
+      const rerunPreviewUrl = backendFiles.length === 1 && !isZipFile(backendFiles[0])
+        ? URL.createObjectURL(backendFiles[0])
+        : undefined;
+      trackObjectUrl(rerunPreviewUrl);
+      const rerunMedia: MediaItem = {
+        ...activeMedia,
+        id: rerunId,
+        filename: `${activeMedia.filename} (rerun)`,
+        status: 'draft',
+        previewUrl: rerunPreviewUrl,
+        jobId: undefined,
+        selectedJobId: undefined,
+        batchId: undefined,
+        errorMessage: undefined,
+      };
+      if (backendFiles.length === 1) {
+        localFilesRef.current[rerunId] = backendFiles[0];
+      }
+      localFileGroupsRef.current[rerunId] = backendFiles;
+      selectedMediaIdRef.current = rerunId;
+      setSelectedMedia(rerunMedia);
+      setMediaLibrary((current) => [rerunMedia, ...current]);
+      activeMedia = rerunMedia;
+    } else if (activeMedia && ['queued', 'processing'].includes(activeMedia.status)) {
+      setError(
+        'This job is already queued or running. Select another draft job to submit.',
+      );
+      return;
+    }
+    if (activeMedia) {
+      updateMediaItem(activeMedia.id, {
+        useCaseProfile: profileForRequest,
+        requestedQuery,
+        effectiveQuery,
+      });
+      setMediaAnalysisActive(activeMedia.id, true);
+    }
     setError(null);
     setAnalysisResult(null);
     setHighlightedFrameId(null);
@@ -750,31 +1059,30 @@ function App() {
     setSelectedBatchJobId(null);
 
     try {
-      const activeMedia = selectedMedia;
-      const backendFiles = selectedFiles.length ? selectedFiles : selectedFile ? [selectedFile] : [];
-
       if (backendConnected && backendFiles.length) {
         setAnalysisMode('backend');
         setActiveStep(0);
-        if (activeMedia) updateMediaStatus(activeMedia.id, 'processing');
+        if (activeMedia) updateMediaStatus(activeMedia.id, 'queued');
         if (isBatchSelection(backendFiles)) {
           const batch = await runBackendBatchAnalysis({
             files: backendFiles,
-            query: trimmedQuery,
+            query: effectiveQuery,
             fps: settings.fps,
             topK: settings.topK,
             enableVlm: shouldRequestVlm(settings),
             vlmProfile: settings.vlmProfile,
             vlmEnabled: shouldRequestVlm(settings),
             device: settings.deviceMode,
+            useCaseProfile: profileForRequest,
           });
-          setBatchStatus(batch);
+          if (!activeMedia || selectedMediaIdRef.current === activeMedia.id) setBatchStatus(batch);
           if (activeMedia) updateMediaJobReference(activeMedia.id, { batchId: batch.batchId });
           if (activeMedia) {
             rememberCachedEntry(buildCacheEntry({
               media: activeMedia,
               batchStatus: batch,
               status: batch.status,
+              queryText: effectiveQuery,
             }));
           }
           const finalBatch = await pollBackendBatch(batch.batchId, activeMedia ?? undefined);
@@ -783,14 +1091,17 @@ function App() {
             throw new Error('Batch analysis finished without a completed video result.');
           }
           const result = await getJobResult(completedFile.jobId);
-          result.settings = settings;
+          result.settings = { ...settings, useCaseProfile: profileForRequest };
+          result.media.useCaseProfile = profileForRequest;
+          result.media.requestedQuery = requestedQuery;
+          result.media.effectiveQuery = effectiveQuery;
           if (activeMedia) {
             const jobEntry: CachedResultEntry = {
               cacheKey: jobCacheKey(completedFile.jobId),
               cacheVersion: 1,
               mediaId: activeMedia.id,
               mediaName: completedFile.filename,
-              query: result.query,
+              query: effectiveQuery,
               source: 'backend',
               status: 'completed',
               savedAt: new Date().toISOString(),
@@ -807,6 +1118,7 @@ function App() {
               batchStatus: finalBatch,
               selectedJobId: completedFile.jobId,
               status: finalBatch.status,
+              queryText: effectiveQuery,
             }));
             updateMediaJobReference(activeMedia.id, {
               batchId: finalBatch.batchId,
@@ -825,13 +1137,14 @@ function App() {
 
         const job = await runBackendAnalysis({
           file: backendFiles[0],
-          query: trimmedQuery,
+          query: effectiveQuery,
           fps: settings.fps,
           topK: settings.topK,
           enableVlm: shouldRequestVlm(settings),
           vlmProfile: settings.vlmProfile,
           vlmEnabled: shouldRequestVlm(settings),
           device: settings.deviceMode,
+          useCaseProfile: profileForRequest,
         });
         if (activeMedia) updateMediaJobReference(activeMedia.id, { jobId: job.jobId, selectedJobId: job.jobId });
         const queuedStatus: JobStatus = {
@@ -843,23 +1156,28 @@ function App() {
           currentStep: 'Queued for analysis',
           error: null,
         };
-        setJobStatus(queuedStatus);
+        if (!activeMedia || selectedMediaIdRef.current === activeMedia.id) setJobStatus(queuedStatus);
         if (activeMedia) {
           rememberCachedEntry(buildCacheEntry({
             media: activeMedia,
             jobStatus: queuedStatus,
             status: queuedStatus.status,
+            queryText: effectiveQuery,
           }));
         }
         const completedStatus = await pollBackendJob(job.jobId, activeMedia ?? undefined);
         const result = await getJobResult(job.jobId);
-        result.settings = settings;
+        result.settings = { ...settings, useCaseProfile: profileForRequest };
+        result.media.useCaseProfile = profileForRequest;
+        result.media.requestedQuery = requestedQuery;
+        result.media.effectiveQuery = effectiveQuery;
         if (activeMedia) {
           rememberCachedEntry(buildCacheEntry({
             media: activeMedia,
             result,
             jobStatus: completedStatus,
             status: 'completed',
+            queryText: effectiveQuery,
           }));
           updateMediaStatus(activeMedia.id, 'completed');
         }
@@ -876,7 +1194,14 @@ function App() {
           setActiveStep(index);
           await wait(330);
         }
-        const result = await runMockAnalysis({ query: trimmedQuery, media: selectedMedia, settings });
+        const result = await runMockAnalysis({
+          query: effectiveQuery,
+          media: { ...selectedMedia, useCaseProfile: profileForRequest, requestedQuery, effectiveQuery },
+          settings: { ...settings, useCaseProfile: profileForRequest },
+        });
+        result.media.useCaseProfile = profileForRequest;
+        result.media.requestedQuery = requestedQuery;
+        result.media.effectiveQuery = effectiveQuery;
         setActiveStep(ANALYSIS_STEPS.length);
         setAnalysisResult(result);
         rememberCachedEntry(buildCacheEntry({
@@ -884,6 +1209,7 @@ function App() {
           result,
           source: 'preview',
           status: 'completed',
+          queryText: effectiveQuery,
         }));
         return;
       }
@@ -894,18 +1220,25 @@ function App() {
 
       throw new Error('SafeTrace backend is not running or not reachable.');
     } catch (err) {
-      setAnalysisMode(null);
-      setSelectedMedia((current) => current?.status === 'processing' ? { ...current, status: 'error' } : current);
-      setError(err instanceof Error ? err.message : 'Analysis could not be completed. Please try again.');
-      setErrorDetails(
-        err instanceof BackendJobFailureError
-          ? err.debugDetails
-          : err instanceof Error
-            ? err.message
-            : 'Analysis could not be completed. Please try again.',
-      );
+      if (!activeMedia || selectedMediaIdRef.current === activeMedia.id) setAnalysisMode(null);
+      if (activeMedia) {
+        updateMediaItem(activeMedia.id, {
+          status: 'error',
+          errorMessage: err instanceof Error ? err.message : 'Analysis could not be completed.',
+        });
+      }
+      if (!activeMedia || selectedMediaIdRef.current === activeMedia.id) {
+        setError(err instanceof Error ? err.message : 'Analysis could not be completed. Please try again.');
+        setErrorDetails(
+          err instanceof BackendJobFailureError
+            ? err.debugDetails
+            : err instanceof Error
+              ? err.message
+              : 'Analysis could not be completed. Please try again.',
+        );
+      }
     } finally {
-      setIsLoading(false);
+      if (activeMedia) setMediaAnalysisActive(activeMedia.id, false);
     }
   }
 
@@ -913,7 +1246,7 @@ function App() {
     setAnalysisResult(null);
     setError(null);
     setErrorDetails(null);
-    setQuery(DEFAULT_QUERY);
+    setQuery(settings.useCaseProfile.defaultQuery);
     setHighlightedFrameId(null);
     setJobStatus(null);
     setBatchStatus(null);
@@ -937,7 +1270,11 @@ function App() {
     }
     try {
       const result = await getJobResult(jobId);
-      result.settings = settings;
+      const resultProfile = result.settings?.useCaseProfile ?? result.media.useCaseProfile ?? selectedMedia?.useCaseProfile ?? settings.useCaseProfile;
+      result.settings = { ...settings, useCaseProfile: resultProfile };
+      result.media.useCaseProfile = resultProfile;
+      result.media.requestedQuery = selectedMedia?.requestedQuery ?? result.query;
+      result.media.effectiveQuery = result.query;
       setSelectedBatchJobId(jobId);
       setAnalysisResult(result);
       setActiveStep(ANALYSIS_STEPS.length);
@@ -958,11 +1295,17 @@ function App() {
           batchStatus,
         });
         rememberCachedEntry(buildCacheEntry({
-          media: selectedMedia,
+          media: {
+            ...selectedMedia,
+            useCaseProfile: resultProfile,
+            requestedQuery: result.media.requestedQuery,
+            effectiveQuery: result.query,
+          },
           result,
           batchStatus,
           selectedJobId: jobId,
           status: batchStatus?.status ?? 'completed',
+          queryText: result.query,
         }));
       }
     } catch (err) {
@@ -976,16 +1319,59 @@ function App() {
     }
   }
 
+  async function deleteKnownBackendJobsForCacheEntries(entries: CachedResultEntry[]) {
+    if (!backendConnected) {
+      return { deleted: 0, failed: 0, skipped: collectTerminalCachedJobIds(entries).length, backendUnavailable: true };
+    }
+    let deleted = 0;
+    let failed = 0;
+    let skipped = 0;
+    for (const jobId of collectTerminalCachedJobIds(entries)) {
+      try {
+        const status = await getJobStatus(jobId);
+        if (!TERMINAL_JOB_STATUSES.has(status.status)) {
+          skipped += 1;
+          continue;
+        }
+        await deleteJob(jobId);
+        deleted += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    return { deleted, failed, skipped, backendUnavailable: false };
+  }
+
+  function backendDeletionMessage(result: Awaited<ReturnType<typeof deleteKnownBackendJobsForCacheEntries>>): string {
+    if (result.backendUnavailable) {
+      return ' Backend runtime was unavailable, so backend job folders may still exist.';
+    }
+    const parts = [`Deleted ${result.deleted} completed/failed backend job${result.deleted === 1 ? '' : 's'}.`];
+    if (result.skipped) parts.push(`Skipped ${result.skipped} queued/running job${result.skipped === 1 ? '' : 's'}.`);
+    if (result.failed) parts.push(`${result.failed} backend deletion${result.failed === 1 ? '' : 's'} could not be completed.`);
+    return ` ${parts.join(' ')}`;
+  }
+
   async function handleClearResultCache() {
+    const entries = Object.values(cachedEntries);
+    clearSafeTraceResultCacheStorageKeys();
     await clearCachedResults();
     setCachedEntries({});
-    setCacheMessage('Local result cache cleared. Uploaded media files were not stored in the browser cache.');
+    const deletion = await deleteKnownBackendJobsForCacheEntries(entries);
+    setCacheMessage(
+      `Browser result cache cleared. Original uploaded media in the browser was not stored.`
+        + backendDeletionMessage(deletion)
+        + ' Generated evidence/report artifacts tied to deleted backend jobs are removed by the backend only for those scoped jobs.',
+    );
   }
 
   async function handleClearSelectedResultCache() {
     if (!selectedMedia) return;
     const entry = cachedEntries[mediaCacheKey(selectedMedia.id)];
+    const childEntry = entry?.selectedJobId ? cachedEntries[jobCacheKey(entry.selectedJobId)] : undefined;
+    const entriesToDelete = [entry, childEntry].filter(Boolean) as CachedResultEntry[];
     const next = { ...cachedEntries };
+    clearSafeTraceResultCacheStorageKeys();
     delete next[mediaCacheKey(selectedMedia.id)];
     await deleteCachedResult(mediaCacheKey(selectedMedia.id));
     if (entry?.selectedJobId) {
@@ -997,7 +1383,12 @@ function App() {
     setJobStatus(null);
     setBatchStatus(null);
     setSelectedBatchJobId(null);
-    setCacheMessage(`Cleared cached result for ${selectedMedia.filename}.`);
+    const deletion = await deleteKnownBackendJobsForCacheEntries(entriesToDelete);
+    setCacheMessage(
+      `Cleared browser cache metadata for ${selectedMedia.filename}.`
+        + backendDeletionMessage(deletion)
+        + ' Queued/running jobs are never deleted by this cache action.',
+    );
   }
 
   function handleFrameSelect(frameId: string) {
@@ -1008,14 +1399,41 @@ function App() {
     window.setTimeout(() => setHighlightedFrameId(null), 2200);
   }
 
+  const selectedProfile = settings.useCaseProfile;
+  const queryConflict = getProfileQueryConflict(selectedProfile, query);
+  const effectiveQueryPreview = buildEffectiveProfileQuery(selectedProfile, query.trim() || selectedProfile.defaultQuery);
+  const selectedMediaStatus = selectedMedia?.status;
+  const selectedMediaBusy = selectedMediaStatus === 'queued' || selectedMediaStatus === 'processing';
   const analyzeDisabledReason = !backendConnected && !previewMode
     ? 'Start SafeTrace Local Runtime, then reconnect before analysis.'
     : !selectedFiles.length && !selectedFile && !canUsePreview
       ? 'Select a local image, video, ZIP archive, or video batch before analysis.'
-      : !query.trim()
-        ? 'Enter a query before analysis.'
-        : undefined;
-  const canAnalyze = !isLoading && !analyzeDisabledReason;
+    : selectedMediaBusy
+      ? 'This selected job is already queued or running. Select another draft job to submit it.'
+      : selectedMediaStatus === 'completed' && !selectedFiles.length && !selectedFile
+        ? 'Re-upload this media to run analysis again.'
+          : queryConflict
+            ? queryConflict
+            : !effectiveQueryPreview.trim()
+              ? 'Enter a query before analysis.'
+              : undefined;
+  const canAnalyze = !analyzeDisabledReason;
+  const analyzeButtonLabel = isLoading
+    ? 'Running'
+    : selectedMediaStatus === 'completed'
+      ? 'Run again'
+    : hasAnyActiveAnalysis
+      ? 'Queue job'
+      : 'Send';
+  const selectedViewerJobId = (
+    isJobId(analysisResult?.jobId)
+      ? analysisResult?.jobId
+      : isJobId(selectedBatchJobId)
+        ? selectedBatchJobId
+        : isJobId(jobStatus?.jobId)
+          ? jobStatus?.jobId
+          : undefined
+  );
 
   return (
     <AppShell
@@ -1038,6 +1456,7 @@ function App() {
           onDeleteMedia={handleDeleteMedia}
           onUploadClick={() => setIsUploadModalOpen(true)}
           uploadDisabled={controlsLocked}
+          activeAnalysisMediaIds={activeAnalysisMediaIds}
         />
       }
     >
@@ -1120,7 +1539,7 @@ function App() {
         disabled={controlsLocked}
         backendConnected={backendConnected}
         previewMode={previewMode}
-        jobId={analysisResult?.jobId ?? selectedBatchJobId ?? jobStatus?.jobId}
+        jobId={selectedViewerJobId}
         onUploadClick={() => setIsUploadModalOpen(true)}
       />
 
@@ -1128,6 +1547,10 @@ function App() {
         query={query}
         isLoading={isLoading}
         hasResult={Boolean(analysisResult)}
+        useCaseProfile={settings.useCaseProfile}
+        effectiveQuery={effectiveQueryPreview}
+        queryConflict={queryConflict}
+        buttonLabel={analyzeButtonLabel}
         onQueryChange={setQuery}
         onAnalyze={handleAnalyze}
         onReset={handleReset}
@@ -1146,7 +1569,16 @@ function App() {
           stage={jobStatus?.stage}
           message={jobStatus?.message}
           mode={analysisMode}
+          status={jobStatus?.status}
+          createdAt={jobStatus?.createdAt}
+          queuedAt={jobStatus?.queuedAt}
           startedAt={jobStatus?.startedAt}
+          completedAt={jobStatus?.completedAt}
+          failedAt={jobStatus?.failedAt}
+          cancelledAt={jobStatus?.cancelledAt}
+          elapsedSeconds={jobStatus?.elapsedSeconds}
+          queueWaitSeconds={jobStatus?.queueWaitSeconds}
+          analysisRuntimeSeconds={jobStatus?.analysisRuntimeSeconds}
           updatedAt={jobStatus?.updatedAt}
           heartbeatAt={jobStatus?.heartbeatAt}
         />
@@ -1189,6 +1621,9 @@ function App() {
             showExplanations={settings.visualExplanations}
             highlightedFrameId={highlightedFrameId}
             jobId={analysisResult.jobId}
+            useCaseProfile={analysisResult.settings?.useCaseProfile ?? analysisResult.media.useCaseProfile}
+            effectiveQuery={analysisResult.query}
+            analysisDiagnostics={resultComponentDiagnostics(analysisResult)}
           />
           
           {showAnnotation && (
@@ -1437,11 +1872,12 @@ function ResultCachePanel({
           <div>
             <p className="font-bold text-slate-950">Local result cache</p>
             <p className="mt-1 leading-6">
-              Cached results stay on this computer/browser only. They are not uploaded to cloud storage.
+              Browser result cache is session-only by default and clears on refresh to avoid stale local memory.
             </p>
             <p className="mt-1 text-xs text-slate-500">
-              Stored: job and batch IDs, result JSON, evidence metadata, backend media/report URLs, and timestamps.
+              Session state can include job and batch IDs, result JSON, evidence metadata, backend media/report URLs, and timestamps.
               Not stored: raw uploaded videos, copied evidence image bytes, model files, credentials, or secrets.
+              Clear cache removes SafeTrace browser keys immediately and, when the backend is connected, best-effort deletes only known completed/failed backend jobs from this UI session. Running or queued jobs are skipped; uploads, model assets, release archives, and unrelated data folders are never broadly deleted.
             </p>
             {message ? <p className="mt-2 text-xs font-semibold text-safety-blue">{message}</p> : null}
           </div>
@@ -1458,7 +1894,7 @@ function ResultCachePanel({
               title={selectedMediaName ? `Clear cached result for ${selectedMediaName}` : 'Clear selected cached result'}
             >
               <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-              Clear selected
+              Clear selected browser cache
             </button>
           ) : null}
           <button
@@ -1468,7 +1904,7 @@ function ResultCachePanel({
             className="focus-ring inline-flex items-center gap-2 rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-            Clear local result cache
+            Clear browser result cache
           </button>
         </div>
       </div>

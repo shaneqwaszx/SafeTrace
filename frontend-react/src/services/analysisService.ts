@@ -15,10 +15,12 @@ import type {
   MediaType,
   Severity,
   SystemStatus,
+  UseCaseProfileSelection,
   Violation,
   ViolationEvent,
   VlmExplanationProfileId,
 } from '../types/analysis';
+import { resolveUseCaseProfile } from '../data/useCaseProfiles';
 
 const MOCK_DELAY_MS = 150;
 const DEFAULT_API_BASE = '/api';
@@ -75,6 +77,17 @@ type BackendViolation = {
   severity: string;
   confidence: number;
   description: string;
+  evidence?: Record<string, unknown>;
+  evidenceStrength?: string;
+  confidenceReason?: string;
+  reviewRequired?: boolean;
+  ruleSupport?: string;
+  suppressedFindings?: unknown[];
+  unsupportedRuleReason?: string | null;
+  verifierAgreement?: string | null;
+  verifierDisagreementReason?: string | null;
+  verifierConfidenceHint?: string | null;
+  finalReviewerNote?: string | null;
 };
 
 type BackendGroupedViolation = {
@@ -100,7 +113,7 @@ type BackendFrameResult = {
   status: 'violations_detected' | 'no_violations';
   imageUrl?: string | null;
   imageMessage?: string | null;
-  explanationSource?: 'vlm' | 'vlm_local' | 'vlm_ollama' | 'vlm_lightweight' | 'vlm_enhanced' | 'rule_based' | null;
+  explanationSource?: 'vlm' | 'vlm_local' | 'vlm_ollama' | 'vlm_lightweight' | 'vlm_enhanced' | 'rule_template_plus_vlm' | 'rule_template_plus_lightweight_vlm' | 'rule_template_plus_lightweight_plus_enhanced' | 'rule_based' | null;
   violations: BackendViolation[];
   technicalEvidence: Record<string, unknown>;
 };
@@ -147,6 +160,27 @@ type BackendAnalysisResult = {
   frames: BackendFrameResult[];
   technicalDetails?: Record<string, unknown> | null;
 };
+
+function serializeUseCaseProfile(profile?: UseCaseProfileSelection): string | undefined {
+  if (!profile) return undefined;
+  return JSON.stringify({
+    profileId: profile.profileId,
+    label: profile.label,
+    category: profile.category,
+    description: profile.description,
+    defaultQuery: profile.defaultQuery,
+    backendSupportLevel: profile.backendSupportLevel,
+    supportedChecks: profile.supportedChecks ?? [],
+    unsupportedChecks: profile.unsupportedChecks ?? [],
+    limitations: profile.limitations,
+    checks: profile.checks ?? [],
+    rules: profile.rules ?? [],
+    notes: profile.notes,
+    customText: profile.customText,
+    requestedQuery: profile.requestedQuery,
+    effectiveQuery: profile.effectiveQuery,
+  });
+}
 
 function parseEnvBoolean(value: string | boolean | undefined, fallback: boolean): boolean {
   if (typeof value === 'boolean') return value;
@@ -395,8 +429,26 @@ function getRecordValue(value: unknown, key: string): unknown {
   return undefined;
 }
 
+function getNestedRecordValue(value: unknown, path: string[]): unknown {
+  return path.reduce<unknown>((current, key) => getRecordValue(current, key), value);
+}
+
 function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function mapUseCaseProfile(value: unknown): UseCaseProfileSelection | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const profileId = optionalString(getRecordValue(value, 'profileId'));
+  if (!profileId) return undefined;
+  const customText = optionalString(getRecordValue(value, 'customText')) || optionalString(getRecordValue(value, 'notes')) || '';
+  const requestedQuery = optionalString(getRecordValue(value, 'requestedQuery')) || optionalString(getRecordValue(value, 'effectiveQuery')) || '';
+  const resolved = resolveUseCaseProfile(profileId, customText, requestedQuery);
+  return {
+    ...resolved,
+    requestedQuery: requestedQuery || resolved.requestedQuery,
+    effectiveQuery: optionalString(getRecordValue(value, 'effectiveQuery')) || resolved.effectiveQuery,
+  };
 }
 
 function mapDetections(frame: BackendFrameResult): Detection[] {
@@ -425,6 +477,17 @@ function mapViolations(violations: BackendViolation[]): Violation[] {
     severity: toSeverity(violation.severity),
     description: violation.description,
     confidence: violation.confidence,
+    evidence: violation.evidence ? { ...violation.evidence } : undefined,
+    evidenceStrength: violation.evidenceStrength,
+    confidenceReason: violation.confidenceReason,
+    reviewRequired: Boolean(violation.reviewRequired),
+    ruleSupport: violation.ruleSupport,
+    suppressedFindings: violation.suppressedFindings,
+    unsupportedRuleReason: violation.unsupportedRuleReason,
+    verifierAgreement: violation.verifierAgreement,
+    verifierDisagreementReason: violation.verifierDisagreementReason,
+    verifierConfidenceHint: violation.verifierConfidenceHint,
+    finalReviewerNote: violation.finalReviewerNote,
   }));
 }
 
@@ -486,9 +549,19 @@ function explanationSourceFor(
   rawSource: unknown,
   rawExplanation: unknown,
   violations: Violation[],
-): 'vlm' | 'vlm_local' | 'vlm_ollama' | 'vlm_lightweight' | 'vlm_enhanced' | 'rule_based' | undefined {
+): 'vlm' | 'vlm_local' | 'vlm_ollama' | 'vlm_lightweight' | 'vlm_enhanced' | 'rule_template_plus_vlm' | 'rule_template_plus_lightweight_vlm' | 'rule_template_plus_lightweight_plus_enhanced' | 'rule_based' | undefined {
   const source = String(rawSource || '').toLowerCase();
   const explanation = typeof rawExplanation === 'string' ? rawExplanation.trim() : '';
+  if (
+    (
+      source === 'rule_template_plus_vlm'
+      || source === 'rule_template_plus_lightweight_vlm'
+      || source === 'rule_template_plus_lightweight_plus_enhanced'
+    )
+    && explanation
+  ) {
+    return source;
+  }
   if ((source === 'vlm_lightweight' || source === 'vlm_enhanced') && explanation && !explanationLooksTechnical(explanation)) {
     return source;
   }
@@ -523,6 +596,11 @@ function mapEvents(events: BackendViolationEvent[] | undefined): ViolationEvent[
 
 function mapBackendResult(result: BackendAnalysisResult): AnalysisResult {
   const mediaName = result.media.name || result.media.id || 'Selected media';
+  const useCaseProfile = mapUseCaseProfile(
+    getNestedRecordValue(result.technicalDetails, ['jobMetrics', 'componentDiagnostics', 'useCaseProfile'])
+      ?? getNestedRecordValue(result.technicalDetails, ['jobMetrics', 'analysisSettings', 'useCaseProfile'])
+      ?? getNestedRecordValue(result.technicalDetails, ['processingMetadata', 'useCaseProfile']),
+  );
 
   return {
     jobId: result.jobId,
@@ -540,6 +618,7 @@ function mapBackendResult(result: BackendAnalysisResult): AnalysisResult {
       source: 'local',
       jobId: result.jobId,
       selectedJobId: result.jobId,
+      useCaseProfile,
     },
     summary: result.summary,
     violations: result.violations,
@@ -547,7 +626,16 @@ function mapBackendResult(result: BackendAnalysisResult): AnalysisResult {
     framesAnalyzed: result.summary.framesAnalyzed,
     generatedAt: new Date().toISOString(),
     summaryText: result.summary.summaryText,
-    settings: undefined,
+    settings: useCaseProfile ? {
+      fps: 1,
+      topK: result.frames.length,
+      visualExplanations: true,
+      vlmProfile: 'rule_based',
+      vlmEnabled: false,
+      enhancedVlmExplanations: false,
+      deviceMode: 'Auto',
+      useCaseProfile,
+    } : undefined,
     frames: result.frames.map((frame) => {
       const violations = mapViolations(frame.violations);
       const rawExplanation = frame.technicalEvidence?.explanation;
@@ -676,6 +764,8 @@ export async function runBackendAnalysis(request: AnalysisRequest): Promise<Anal
   formData.append('enableVlm', String(request.enableVlm));
   if (request.vlmProfile) formData.append('vlmProfile', request.vlmProfile);
   if (typeof request.vlmEnabled === 'boolean') formData.append('vlmEnabled', String(request.vlmEnabled));
+  const useCaseProfile = serializeUseCaseProfile(request.useCaseProfile);
+  if (useCaseProfile) formData.append('useCaseProfile', useCaseProfile);
   formData.append('device', deviceToApiMode(request.device));
 
   return apiFetch<AnalysisJob>('analyze', {
@@ -695,6 +785,8 @@ export async function runBackendBatchAnalysis(request: BatchAnalysisRequest): Pr
   formData.append('enableVlm', String(request.enableVlm));
   if (request.vlmProfile) formData.append('vlmProfile', request.vlmProfile);
   if (typeof request.vlmEnabled === 'boolean') formData.append('vlmEnabled', String(request.vlmEnabled));
+  const useCaseProfile = serializeUseCaseProfile(request.useCaseProfile);
+  if (useCaseProfile) formData.append('useCaseProfile', useCaseProfile);
   formData.append('device', deviceToApiMode(request.device));
 
   return apiFetch<BatchStatus>('batches/analyze', {

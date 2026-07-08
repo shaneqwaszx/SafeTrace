@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import shutil
+import threading
+import time
 import uuid
 import zipfile
 from dataclasses import dataclass, field
@@ -19,6 +23,9 @@ from .jobs import AnalysisSettings, JobRecord, JobStore, MEDIA_EXTENSIONS, max_u
 BatchState = Literal["queued", "running", "completed", "failed", "partial", "cancelled"]
 BATCH_MANIFEST_FILENAME = "manifest.json"
 VIDEO_EXTENSIONS = {extension for extension, media_type in MEDIA_EXTENSIONS.items() if media_type == "video"}
+logger = logging.getLogger("safetrace.api.batches")
+_MANIFEST_LOCKS: dict[Path, threading.RLock] = {}
+_MANIFEST_LOCKS_GUARD = threading.Lock()
 
 
 class BatchValidationError(ValueError):
@@ -26,6 +33,10 @@ class BatchValidationError(ValueError):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+
+
+class BatchManifestPersistenceError(OSError):
+    """Raised when a batch manifest cannot be persisted after retries."""
 
 
 @dataclass
@@ -68,6 +79,7 @@ class BatchRecord:
     accepted_files: list[BatchFile] = field(default_factory=list)
     rejected_files: list[RejectedBatchFile] = field(default_factory=list)
     status_counts: Dict[str, int] = field(default_factory=dict)
+    persistence_warning: Optional[str] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -90,6 +102,7 @@ class BatchRecord:
             "statusCounts": self.status_counts,
             "createdAt": _to_iso(self.created_at),
             "updatedAt": _to_iso(self.updated_at),
+            "persistenceWarning": self.persistence_warning,
         }
 
 
@@ -113,11 +126,49 @@ def _parse_datetime(value: Any) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+def _manifest_lock(path: Path) -> threading.RLock:
+    key = path.resolve()
+    with _MANIFEST_LOCKS_GUARD:
+        lock = _MANIFEST_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _MANIFEST_LOCKS[key] = lock
+        return lock
+
+
+def _cleanup_temporary(path: Path) -> None:
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _atomic_write_json(path: Path, payload: Dict[str, Any], *, retries: int = 5, backoff_seconds: float = 0.05) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    temporary.replace(path)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp")
+    lock = _manifest_lock(path)
+    with lock:
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            last_error: PermissionError | None = None
+            for attempt in range(max(1, retries)):
+                try:
+                    os.replace(temporary, path)
+                    return
+                except PermissionError as exc:
+                    last_error = exc
+                    if attempt >= retries - 1:
+                        break
+                    time.sleep(backoff_seconds * (attempt + 1))
+            raise BatchManifestPersistenceError(f"Could not replace {path} after {retries} attempts.") from last_error
+        finally:
+            _cleanup_temporary(temporary)
 
 
 def _new_batch_id() -> str:
@@ -176,6 +227,7 @@ class BatchStore:
         self.root_dir = Path(root_dir or SETTINGS.data_dir / "api_batches")
         self.root_dir.mkdir(parents=True, exist_ok=True)
         self._batches: Dict[str, BatchRecord] = {}
+        self._lock = threading.RLock()
 
     def create_from_zip(
         self,
@@ -314,11 +366,12 @@ class BatchStore:
         return batch
 
     def get(self, batch_id: str, job_store: JobStore | None = None) -> Optional[BatchRecord]:
-        record = self._batches.get(batch_id)
-        if record is None:
-            record = self.load_batch(batch_id)
-            if record is not None:
-                self._batches[batch_id] = record
+        with self._lock:
+            record = self._batches.get(batch_id)
+            if record is None:
+                record = self.load_batch(batch_id)
+                if record is not None:
+                    self._batches[batch_id] = record
         if record is not None and job_store is not None:
             self.refresh(record, job_store)
         return record
@@ -330,21 +383,35 @@ class BatchStore:
         return record
 
     def refresh(self, record: BatchRecord, job_store: JobStore) -> BatchRecord:
+        changed = False
         counts: Dict[str, int] = {}
-        for item in record.accepted_files:
-            job = job_store.get(item.job_id)
-            if job is None:
-                item.status = "failed"
-                item.error = "Job manifest is missing."
-            else:
-                item.status = job.status
-                item.error = job.error
-            counts[item.status] = counts.get(item.status, 0) + 1
+        with self._lock:
+            for item in record.accepted_files:
+                job = job_store.get(item.job_id)
+                if job is None:
+                    next_status = "failed"
+                    next_error = "Job manifest is missing."
+                else:
+                    next_status = job.status
+                    next_error = job.error
+                if item.status != next_status or item.error != next_error:
+                    changed = True
+                    item.status = next_status
+                    item.error = next_error
+                counts[item.status] = counts.get(item.status, 0) + 1
 
-        record.status_counts = counts
-        record.status = self._derive_status(record)
-        record.updated_at = _utc_now()
-        self.persist_batch(record)
+            next_status = self._derive_status(record)
+            manifest_missing = not record.manifest_path.is_file()
+            if record.status_counts != counts:
+                changed = True
+                record.status_counts = counts
+            if record.status != next_status:
+                changed = True
+                record.status = next_status
+
+            if changed or manifest_missing:
+                record.updated_at = _utc_now()
+                self.persist_batch(record)
         return record
 
     def delete(self, batch_id: str, job_store: JobStore) -> bool:
@@ -358,7 +425,15 @@ class BatchStore:
         return True
 
     def persist_batch(self, record: BatchRecord) -> None:
-        _atomic_write_json(record.manifest_path, record.payload())
+        try:
+            record.persistence_warning = None
+            _atomic_write_json(record.manifest_path, record.payload())
+        except BatchManifestPersistenceError as exc:
+            record.persistence_warning = str(exc)
+            logger.warning("Batch manifest persistence failed for %s: %s", record.batch_id, exc)
+            if record.manifest_path.is_file():
+                return
+            raise
 
     def load_batch(self, batch_id: str) -> Optional[BatchRecord]:
         if not _is_safe_batch_id(batch_id):

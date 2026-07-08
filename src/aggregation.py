@@ -42,6 +42,9 @@ def aggregate_violation_events(
                 "timestamp": frame.get("timestamp"),
                 "confidence": confidence,
                 "imageUrl": frame.get("imageUrl"),
+                "evidenceStrength": violation.get("evidenceStrength"),
+                "confidenceReason": violation.get("confidenceReason"),
+                "verifierAgreement": violation.get("verifierAgreement"),
             }
 
             existing = active_by_type.get(violation_id)
@@ -59,6 +62,8 @@ def aggregate_violation_events(
                     "lastSecond": frame_second,
                     "supportingFrames": [support],
                     "confidences": [confidence],
+                    "evidenceStrengths": [violation.get("evidenceStrength")],
+                    "verifierAgreements": [violation.get("verifierAgreement")],
                 }
                 events.append(event)
                 active_by_type[violation_id] = event
@@ -69,12 +74,16 @@ def aggregate_violation_events(
             existing["lastSecond"] = frame_second
             existing["supportingFrames"].append(support)
             existing["confidences"].append(confidence)
+            existing.setdefault("evidenceStrengths", []).append(violation.get("evidenceStrength"))
+            existing.setdefault("verifierAgreements", []).append(violation.get("verifierAgreement"))
             if SEVERITY_RANK.get(severity, 0) > SEVERITY_RANK.get(str(existing["severity"]).lower(), 0):
                 existing["severity"] = severity
 
     normalized_events: list[dict[str, Any]] = []
     for event in events:
         confidences = [float(value) for value in event.pop("confidences")]
+        evidence_strengths = [str(value) for value in event.pop("evidenceStrengths", []) if value]
+        verifier_agreements = [str(value) for value in event.pop("verifierAgreements", []) if value]
         supporting_frames = list(event["supportingFrames"])
         representative_confidence = sum(confidences) / len(confidences) if confidences else 0.0
         normalized_events.append(
@@ -89,6 +98,8 @@ def aggregate_violation_events(
                 "representativeConfidence": representative_confidence,
                 "confidenceMin": min(confidences) if confidences else 0.0,
                 "confidenceMax": max(confidences) if confidences else 0.0,
+                "evidenceStrengths": sorted(set(evidence_strengths)),
+                "verifierAgreements": sorted(set(verifier_agreements)),
                 "supportingFrameCount": len(supporting_frames),
                 "supportingFrames": supporting_frames,
             }

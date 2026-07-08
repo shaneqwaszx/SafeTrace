@@ -1,6 +1,7 @@
 import clsx from 'clsx';
 import { CheckCircle2, ShieldAlert, Sparkles } from 'lucide-react';
-import type { FrameResult } from '../types/analysis';
+import type { FrameResult, UseCaseProfileSelection, Violation } from '../types/analysis';
+import { isViolationAlignedWithProfile, profileFindingContext, supportLevelLabel } from '../data/useCaseProfiles';
 import { formatConfidence, formatQueryRelevance } from '../utils/formatters';
 import { EvidenceFrameVisual } from './EvidenceFrameVisual';
 import { SeverityBadge } from './SeverityBadge';
@@ -12,6 +13,9 @@ type FrameEvidenceCardProps = {
   showExplanation: boolean;
   isHighlighted?: boolean;
   jobId?: string | null;
+  useCaseProfile?: UseCaseProfileSelection;
+  effectiveQuery?: string;
+  analysisDiagnostics?: Record<string, unknown> | null;
 };
 
 function mobileSamRefinement(frame: FrameResult): Record<string, unknown> | null {
@@ -28,26 +32,227 @@ function lightweightVlmExplanation(frame: FrameResult): Record<string, unknown> 
   return explanation && typeof explanation === 'object' ? explanation as Record<string, unknown> : null;
 }
 
-export function FrameEvidenceCard({ frame, showExplanation, isHighlighted = false, jobId }: FrameEvidenceCardProps) {
-  const hasViolations = frame.violations.length > 0;
+function metadataString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function evidenceStrengthLabel(value: unknown): string {
+  const normalized = typeof value === 'string' ? value : '';
+  const labels: Record<string, string> = {
+    confirmed_violation: 'Strong visual evidence',
+    likely_violation: 'Likely issue',
+    review_candidate: 'Review cue',
+    insufficient_evidence: 'Insufficient evidence',
+    unsupported_rule: 'Not enough model support',
+  };
+  return labels[normalized] || 'Review cue';
+}
+
+function verifierAgreementLabel(value: unknown): string | null {
+  if (value === 'supports') return 'Visual review supports the finding';
+  if (value === 'inconclusive') return 'Visual review inconclusive';
+  if (value === 'disagrees') return 'Visual review may disagree with the base finding';
+  return null;
+}
+
+function evidenceModeDiagnostics(frame: FrameResult, analysisDiagnostics?: Record<string, unknown> | null) {
+  const searchMetadata = frame.technicalEvidence?.searchMetadata;
+  const metadata = searchMetadata && typeof searchMetadata === 'object' ? searchMetadata as Record<string, unknown> : {};
+  const vlmWorker = metadata.lightweightVlmExplanation && typeof metadata.lightweightVlmExplanation === 'object'
+    ? metadata.lightweightVlmExplanation as Record<string, unknown>
+    : {};
+  return {
+    requestedMode: metadataString(metadata.requestedVisualExplanationMode)
+      ?? metadataString(analysisDiagnostics?.requestedVisualExplanationMode)
+      ?? metadataString(analysisDiagnostics?.vlmProfile),
+    actualMode: metadataString(metadata.actualExplanationMode)
+      ?? metadataString(analysisDiagnostics?.actualExplanationMode)
+      ?? metadataString(analysisDiagnostics?.effectiveExplanationMode)
+      ?? (frame.explanationSource || 'rule_based'),
+    workerAttempted: Boolean(vlmWorker.lightweightVlmWorkerAttempted ?? analysisDiagnostics?.lightweightVlmWorkerAttempted),
+    workerSucceeded: Boolean(vlmWorker.lightweightVlmWorkerSucceeded ?? analysisDiagnostics?.lightweightVlmWorkerSucceeded),
+    fallbackReason: metadataString(vlmWorker.lightweightVlmFallbackReason)
+      ?? metadataString(analysisDiagnostics?.lightweightVlmFallbackReason)
+      ?? metadataString(analysisDiagnostics?.fallbackReason),
+    baseSource: metadataString(vlmWorker.baseExplanationSource)
+      ?? metadataString(analysisDiagnostics?.baseExplanationSource)
+      ?? 'rule_based',
+    finalSource: metadataString(vlmWorker.finalExplanationSource)
+      ?? metadataString(analysisDiagnostics?.finalExplanationSource),
+    lightweightContributionAccepted: Boolean(
+      vlmWorker.lightweightVlmContributionAccepted ?? analysisDiagnostics?.lightweightVlmContributionAccepted,
+    ),
+    enhancedLayerStatus: metadataString(vlmWorker.enhancedVlmLayerStatus)
+      ?? metadataString(analysisDiagnostics?.enhancedVlmLayerStatus)
+      ?? 'unavailable',
+  };
+}
+
+function friendlyFindingName(violation?: Pick<Violation, 'name' | 'type'> | null): string {
+  const raw = String(violation?.name || violation?.type || '').toLowerCase();
+  if (raw.includes('seatbelt')) return 'missing seatbelt';
+  if (raw.includes('helmet') || raw.includes('ppe')) return 'missing helmet/PPE';
+  if (raw.includes('phone')) return 'phone use / distracted driving';
+  if (raw.includes('proximity')) return 'unsafe proximity';
+  if (!raw) return 'safety finding';
+  return raw
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+    .replace(/^./, (letter) => letter.toLowerCase());
+}
+
+function reviewLevelLabel(value: unknown): string {
+  const normalized = typeof value === 'string' ? value : '';
+  const labels: Record<string, string> = {
+    confirmed_violation: 'Strong visual evidence',
+    likely_violation: 'Likely issue',
+    review_candidate: 'Review cue',
+    insufficient_evidence: 'Insufficient evidence',
+    unsupported_rule: 'Not enough model support',
+  };
+  return labels[normalized] || 'Review cue';
+}
+
+function structuredVlmField(text: string | null | undefined, field: string): string | null {
+  if (!text) return null;
+  const fields = 'visible_evidence|visual_status|short_reason|confidence_hint|refined_visual_summary|uncertainty_reason|reviewer_note';
+  const pattern = new RegExp(`\\b${field}\\s*:\\s*(.*?)(?=\\b(?:${fields})\\s*:|$)`, 'i');
+  const match = pattern.exec(text);
+  if (!match) return null;
+  const value = match[1].replace(/\s+/g, ' ').trim().replace(/[.:;\s]+$/, '');
+  return value || null;
+}
+
+function visualReviewText(vlmWorker: Record<string, unknown> | null, modeDiagnostics: ReturnType<typeof evidenceModeDiagnostics>) {
+  const fallbackReason = metadataString(vlmWorker?.lightweightVlmFallbackReason) ?? modeDiagnostics.fallbackReason;
+  const cleanPreview = metadataString(vlmWorker?.lightweightVlmCleanTextPreview)
+    ?? metadataString(vlmWorker?.lightweightVlmRawTextPreview);
+  const visualStatus = structuredVlmField(cleanPreview, 'visual_status');
+  const shortReason = structuredVlmField(cleanPreview, 'short_reason')
+    ?? structuredVlmField(cleanPreview, 'refined_visual_summary');
+  const visibleEvidence = structuredVlmField(cleanPreview, 'visible_evidence');
+  const modelProfile = metadataString(vlmWorker?.lightweightVlmModelProfile);
+  const modelLabel = modeDiagnostics.enhancedLayerStatus === 'succeeded'
+    ? 'Enhanced VLM'
+    : modelProfile?.includes('256')
+      ? 'Local VLM'
+      : 'Local VLM';
+
+  if (modeDiagnostics.workerSucceeded && (shortReason || visualStatus || visibleEvidence)) {
+    return `${modelLabel}: ${[visualStatus, shortReason || visibleEvidence].filter(Boolean).join('. ')}.`;
+  }
+  if (modeDiagnostics.workerSucceeded) {
+    return `${modelLabel}: added local visual review for this frame.`;
+  }
+  if (modeDiagnostics.workerAttempted && fallbackReason?.toLowerCase().includes('timeout')) {
+    return 'Local visual review timed out for this frame; Fast Local Analysis remains available.';
+  }
+  if (modeDiagnostics.workerAttempted) {
+    return 'Local visual review could not add a reliable explanation for this frame; Fast Local Analysis remains available.';
+  }
+  if (fallbackReason === 'visual_review_frame_limit_reached' || fallbackReason === 'local_visual_review_not_selected') {
+    return 'Local visual review was not run for this lower-priority frame.';
+  }
+  return 'Fast Local Analysis is available for this frame. Local visual review details are available in technical evidence when enabled.';
+}
+
+function whyFlaggedText(violation?: Violation | null): string {
+  const name = String(violation?.name || violation?.type || '').toLowerCase();
+  if (name.includes('seatbelt')) {
+    return 'SafeTrace could not confirm a visible belt path in this evidence frame.';
+  }
+  if (name.includes('helmet') || name.includes('ppe')) {
+    return 'SafeTrace could not confirm visible helmet/PPE evidence in the selected area.';
+  }
+  if (name.includes('phone')) {
+    return 'SafeTrace flagged possible phone or distracted-driving evidence for review.';
+  }
+  return violation?.description || 'SafeTrace flagged this frame for safety review based on the selected profile and detector evidence.';
+}
+
+function whatToCheckText(violation?: Violation | null): string {
+  const name = String(violation?.name || violation?.type || '').toLowerCase();
+  if (name.includes('seatbelt')) {
+    return 'Confirm whether a belt crosses the torso, especially if glare, blur, occlusion, or camera angle affects visibility.';
+  }
+  if (name.includes('helmet') || name.includes('ppe')) {
+    return 'Confirm whether the head and required PPE are visible in the original footage.';
+  }
+  if (name.includes('phone')) {
+    return 'Confirm whether a phone is visible near the hand, face, or driver area and whether active use is clear.';
+  }
+  return 'Review the original footage before treating this frame as a final operational finding.';
+}
+
+function explanationSourceInfo(
+  frame: FrameResult,
+  vlmWorker: Record<string, unknown> | null,
+  modeDiagnostics: ReturnType<typeof evidenceModeDiagnostics>,
+) {
+  const source = [
+    modeDiagnostics.finalSource,
+    modeDiagnostics.actualMode,
+    frame.explanationSource,
+    metadataString(vlmWorker?.lightweightVlmExplanationSource),
+  ].filter(Boolean).join(' ').toLowerCase();
+  if (source.includes('enhanced')) {
+    return {
+      header: 'Advanced GPU VLM Assist explanation',
+      note: 'SafeTrace used the enhanced GPU visual review to refine the detector/rule evidence.',
+    };
+  }
+  if (source.includes('lightweight') || source.includes('vlm')) {
+    return {
+      header: 'Local VLM Assist explanation',
+      note: 'SafeTrace used local visual review to refine the detector/rule evidence.',
+    };
+  }
+  const requested = [
+    modeDiagnostics.requestedMode,
+    metadataString(vlmWorker?.lightweightVlmModelProfile),
+  ].filter(Boolean).join(' ').toLowerCase();
+  const wasVlmRequested = requested.includes('lightweight') || requested.includes('enhanced') || modeDiagnostics.workerAttempted;
+  return {
+    header: 'Fast Local Analysis explanation',
+    note: wasVlmRequested
+      ? 'Local visual review did not add a confident result for this frame.'
+      : 'SafeTrace used local detector/rule evidence for this frame.',
+  };
+}
+
+export function FrameEvidenceCard({
+  frame,
+  showExplanation,
+  isHighlighted = false,
+  jobId,
+  useCaseProfile,
+  effectiveQuery,
+  analysisDiagnostics,
+}: FrameEvidenceCardProps) {
+  const displayedViolations = useCaseProfile
+    ? frame.violations.filter((violation) => isViolationAlignedWithProfile(useCaseProfile, violation.name || violation.type))
+    : frame.violations;
+  const hiddenProfileViolationCount = frame.violations.length - displayedViolations.length;
+  const hasViolations = displayedViolations.length > 0;
   const refinement = mobileSamRefinement(frame);
   const vlmWorker = lightweightVlmExplanation(frame);
+  const modeDiagnostics = evidenceModeDiagnostics(frame, analysisDiagnostics);
   const detectorBoxFallbackUsed = refinement?.mobileSamRefinementSource === 'fallback';
-  const vlmWorkerFallbackUsed = Boolean(
-    vlmWorker?.lightweightVlmWorkerEnabled
-    && vlmWorker?.lightweightVlmWorkerAttempted
-    && !vlmWorker?.lightweightVlmWorkerSucceeded,
-  );
-  const vlmFallbackReason = typeof vlmWorker?.lightweightVlmFallbackReason === 'string'
-    ? vlmWorker.lightweightVlmFallbackReason
-    : null;
-  const explanationLabel = frame.explanationSource === 'vlm_lightweight'
-    ? 'Lightweight VLM explanation'
-    : frame.explanationSource === 'vlm_enhanced'
-      ? 'Enhanced VLM explanation'
-      : frame.explanationSource && frame.explanationSource !== 'rule_based'
-        ? 'VLM explanation'
-        : 'Rule-based explanation';
+  const primaryViolation = displayedViolations[0] ?? null;
+  const visualReviewCopy = visualReviewText(vlmWorker, modeDiagnostics);
+  const explanationInfo = explanationSourceInfo(frame, vlmWorker, modeDiagnostics);
+  const primaryAgreement = primaryViolation?.verifierAgreement;
+  const reviewLevelCopy = primaryAgreement === 'disagrees'
+    ? 'Visual review may disagree with the base finding. Do not treat this as an automatic violation or automatic clearance.'
+    : primaryAgreement === 'inconclusive'
+      ? 'Visual review was inconclusive. Confirm this in the original footage before acting.'
+      : `${reviewLevelLabel(primaryViolation?.evidenceStrength)}. Review confidence ${formatConfidence(primaryViolation?.confidence ?? 0)}.`;
+  const detectorSummary = frame.detections.length
+    ? frame.detections
+      .slice(0, 5)
+      .map((detection) => `${detection.label} ${Math.round(detection.confidence * 100)}%`)
+      .join(', ')
+    : 'No detector classes reported';
 
   return (
     <article
@@ -74,10 +279,20 @@ export function FrameEvidenceCard({ frame, showExplanation, isHighlighted = fals
                 Detector-box fallback used
               </p>
             ) : null}
-            {vlmWorkerFallbackUsed ? (
-              <p className="mt-2 inline-flex rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-900">
-                VLM fallback: {vlmFallbackReason || 'rule-based explanation used'}
-              </p>
+            {useCaseProfile ? (
+              <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs leading-5 text-slate-700">
+                <span className="font-semibold text-slate-900">{useCaseProfile.label}</span>
+                <span className="ml-2 rounded-full border border-slate-200 bg-white px-2 py-0.5 font-semibold uppercase text-slate-500">
+                  {supportLevelLabel(useCaseProfile.backendSupportLevel)}
+                </span>
+                <p>Effective query: <span className="font-semibold">{effectiveQuery ?? useCaseProfile.effectiveQuery ?? 'Not recorded'}</span></p>
+                <p>Detector classes involved: {detectorSummary}</p>
+                {hiddenProfileViolationCount ? (
+                  <p className="font-semibold text-amber-800">
+                    {hiddenProfileViolationCount} finding{hiddenProfileViolationCount === 1 ? '' : 's'} outside this profile were de-prioritized from the prominent findings panel.
+                  </p>
+                ) : null}
+              </div>
             ) : null}
           </div>
           <StatusBadge
@@ -100,17 +315,48 @@ export function FrameEvidenceCard({ frame, showExplanation, isHighlighted = fals
                 Frame findings
               </div>
               <div className="flex flex-col gap-2">
-                {frame.violations.map((violation) => (
+                {displayedViolations.map((violation) => (
                   <div
                     key={violation.id}
                     className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
                   >
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm font-semibold text-slate-950">{violation.name}</span>
+                      <span className="text-sm font-semibold text-slate-950">{friendlyFindingName(violation)}</span>
                       <SeverityBadge severity={violation.severity} />
                     </div>
                     <p className="mt-1 text-xs font-medium text-slate-500">
-                      Confidence: {formatConfidence(violation.confidence)}
+                      Review confidence: {formatConfidence(violation.confidence)}
+                    </p>
+                    <p className="mt-1 text-xs font-semibold text-slate-600">
+                      Review level: {evidenceStrengthLabel(violation.evidenceStrength)}
+                      {violation.reviewRequired ? ' - review required' : ''}
+                    </p>
+                    {violation.confidenceReason ? (
+                      <p className="mt-1 text-xs leading-5 text-slate-500">
+                        Reason: {violation.confidenceReason}
+                      </p>
+                    ) : null}
+                    {verifierAgreementLabel(violation.verifierAgreement) ? (
+                      <p
+                        className={clsx(
+                          'mt-1 rounded-md border px-2 py-1 text-xs font-semibold',
+                          violation.verifierAgreement === 'disagrees'
+                            ? 'border-amber-200 bg-amber-50 text-amber-900'
+                            : 'border-slate-200 bg-white text-slate-700',
+                        )}
+                      >
+                        {verifierAgreementLabel(violation.verifierAgreement)}
+                        {violation.verifierDisagreementReason ? `: ${violation.verifierDisagreementReason}` : ''}
+                        {violation.verifierConfidenceHint ? ` Confidence hint: ${violation.verifierConfidenceHint}` : ''}
+                      </p>
+                    ) : null}
+                    {violation.finalReviewerNote ? (
+                      <p className="mt-1 text-xs leading-5 text-slate-500">
+                        Reviewer note: {violation.finalReviewerNote}
+                      </p>
+                    ) : null}
+                    <p className="mt-1 text-xs leading-5 text-slate-500">
+                      {profileFindingContext(useCaseProfile, violation.name || violation.type)}
                     </p>
                   </div>
                 ))}
@@ -122,16 +368,51 @@ export function FrameEvidenceCard({ frame, showExplanation, isHighlighted = fals
                 <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                 <span>No matching violations found in this frame.</span>
               </div>
+              {hiddenProfileViolationCount ? (
+                <p className="mt-2 text-xs leading-5 text-emerald-900">
+                  Raw detector/rule output included {hiddenProfileViolationCount} finding{hiddenProfileViolationCount === 1 ? '' : 's'} outside this profile; review technical evidence if needed.
+                </p>
+              ) : null}
             </div>
           )}
 
-          {showExplanation && frame.explanation ? (
+          {showExplanation && hasViolations ? (
             <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm leading-6 text-blue-900">
+              <div className="mb-3 rounded-lg border border-blue-200 bg-white/80 px-3 py-2">
+                <p className="text-sm font-bold text-blue-950">{explanationInfo.header}</p>
+                <p className="mt-1 text-xs leading-5 text-blue-800">{explanationInfo.note}</p>
+              </div>
               <div className="mb-1 flex items-center gap-2 font-semibold">
                 <Sparkles className="h-4 w-4" aria-hidden="true" />
-                {explanationLabel}
+                Safety review
               </div>
-              <p className="whitespace-pre-line">{frame.explanation}</p>
+              <p className="font-semibold">
+                {reviewLevelLabel(primaryViolation?.evidenceStrength)}: possible {friendlyFindingName(primaryViolation)}.
+              </p>
+              <p className="mt-1">
+                Treat this as a review cue, not a final decision.
+              </p>
+              <div className="mt-3 space-y-3">
+                <section>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-blue-950">Why this was flagged</p>
+                  <p>{whyFlaggedText(primaryViolation)}</p>
+                </section>
+                <section>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-blue-950">Visual review</p>
+                  <p>{visualReviewCopy}</p>
+                </section>
+                <section>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-blue-950">Review level</p>
+                  <p>{reviewLevelCopy}</p>
+                  {primaryViolation?.finalReviewerNote ? (
+                    <p className="mt-1">{primaryViolation.finalReviewerNote}</p>
+                  ) : null}
+                </section>
+                <section>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-blue-950">What to check in the original footage</p>
+                  <p>{whatToCheckText(primaryViolation)}</p>
+                </section>
+              </div>
             </div>
           ) : null}
         </div>

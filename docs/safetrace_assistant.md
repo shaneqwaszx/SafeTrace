@@ -143,6 +143,34 @@ set OMP_NUM_THREADS=1
 .venv\Scripts\python.exe -m uvicorn src.api.server:app --host 127.0.0.1 --port 8000 --log-level info
 ```
 
+For the source backend profile that also enables the Lightweight VLM worker,
+use the checked startup helper:
+
+```cmd
+scripts\start_safetrace_dev_backend.bat
+```
+
+That helper prefers `.venv\Scripts\python.exe`, starts CPU Safe Mode, sets
+`SAFETRACE_CHAT_PROVIDER=packaged_llamacpp`, enables the local Lightweight VLM
+worker with a 60-second subprocess timeout and a local visual review frame limit,
+checks `llama_cpp`, and prints the exact
+`llama-cpp-python` install command if the runtime is missing. Starting uvicorn
+manually without those environment variables can leave the assistant in limited
+mode and make Lightweight VLM look selected while evidence still falls back to
+rule-based explanations because the worker was never enabled.
+
+The helper sets `SAFETRACE_VLM_FRAME_LIMIT=5`, keeps
+`SAFETRACE_VLM_MAX_EVIDENCE_FRAMES=5` for compatibility, and sets
+`SAFETRACE_VLM_JOB_TIMEOUT_SECONDS=0` so local installed VLMs use per-attempt
+watchdogs rather than a shared user-visible job budget.
+Lightweight VLM answers are attached per evidence frame only when the worker
+runs and the output passes the safety-specific quality gate. Frames skipped by
+frame-limit policy, missing eligible violations, worker failures, timeouts, or
+generic output remain rule-based and should show the specific skip or fallback
+reason in technical evidence. If one VLM attempt times out or the output fails
+quality checks, SafeTrace keeps the result available and records the runtime
+guard reason without showing raw budget wording in the normal UI.
+
 Restart the backend after installing. Main SafeTrace analysis, single-video
 upload, ZIP/batch upload, and rule-based visual explanation fallback continue
 to work while chat is unavailable or in limited help mode.

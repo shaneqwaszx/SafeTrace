@@ -49,7 +49,9 @@ def test_config_example_exists_with_packaged_defaults():
     assert "SAFETRACE_VLM_MODEL_PATH=models/vlm" in content
     assert "SAFETRACE_VLM_DIR=models/vlm" in content
     assert "SAFETRACE_VLM_LIGHTWEIGHT_MODEL_PATH=models/vlm/lightweight-256m" in content
+    assert "SAFETRACE_VLM_LIGHTWEIGHT_512M_MODEL_PATH=models/vlm/lightweight-512m" in content
     assert "SAFETRACE_VLM_ENHANCED_MODEL_PATH=models/vlm/enhanced-2b" in content
+    assert "SAFETRACE_VLM_ENHANCED_3B_MODEL_PATH=models/vlm/enhanced-3b" in content
     assert "SAFETRACE_VLM_MODEL=local-vlm" in content
     assert "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED=false" in content
     assert "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_TIMEOUT_SECONDS=60" in content
@@ -77,6 +79,9 @@ def test_release_profiles_prepare_safe_mode_main_and_optional_profiles():
     combined_worker_profile = PACKAGE_RELEASE_PROFILES[
         "SafeTrace_RC_MobileSAM_Worker_LightweightVLM_Worker_Experimental"
     ]
+    lightweight_512m = PACKAGE_RELEASE_PROFILES["SafeTrace_RC_Lightweight512M_VLM_Experimental"]
+    enhanced_3b = PACKAGE_RELEASE_PROFILES["SafeTrace_Internal_Enhanced3B_VLM_Experimental"]
+    full_lab = PACKAGE_RELEASE_PROFILES["SafeTrace_Internal_Lab_AllModels"]
 
     assert MAIN_RELEASE_PROFILE_NAME == "SafeTrace_RC_SafeMode_RuleBased"
     assert main["env"]["SAFETRACE_ANALYSIS_SAFE_MODE"] == "true"
@@ -128,10 +133,30 @@ def test_release_profiles_prepare_safe_mode_main_and_optional_profiles():
     assert combined_worker_profile["env"]["SAFETRACE_VLM_ENABLED"] == "true"
     assert combined_worker_profile["env"]["SAFETRACE_VLM_PROFILE"] == "lightweight_256m"
     assert combined_worker_profile["env"]["SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED"] == "true"
-    assert combined_worker_profile["env"]["SAFETRACE_LIGHTWEIGHT_VLM_WORKER_TIMEOUT_SECONDS"] == "120"
+    assert combined_worker_profile["env"]["SAFETRACE_LIGHTWEIGHT_VLM_WORKER_TIMEOUT_SECONDS"] == "60"
+    assert combined_worker_profile["env"]["SAFETRACE_VLM_FRAME_LIMIT"] == "5"
+    assert combined_worker_profile["env"]["SAFETRACE_VLM_MAX_EVIDENCE_FRAMES"] == "5"
+    assert combined_worker_profile["env"]["SAFETRACE_VLM_JOB_TIMEOUT_SECONDS"] == "0"
     assert combined_worker_profile["env"]["SAFETRACE_VLM_MAX_TOKENS"] == "64"
     assert "Selected/internal testing only" in combined_worker_profile["notes"][0]
     assert "Enhanced VLM assets are intentionally excluded." in combined_worker_profile["notes"]
+
+    assert lightweight_512m["env"]["SAFETRACE_VLM_ENABLED"] == "true"
+    assert lightweight_512m["env"]["SAFETRACE_VLM_PROFILE"] == "lightweight_512m"
+    assert lightweight_512m["env"]["SAFETRACE_VLM_MODEL_PATH"] == "models/vlm/lightweight-512m"
+    assert lightweight_512m["env"]["SAFETRACE_VLM_LIGHTWEIGHT_512M_MODEL_PATH"] == "models/vlm/lightweight-512m"
+    assert lightweight_512m["env"]["SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED"] == "true"
+    assert "Do not include enhanced-3b" in lightweight_512m["notes"][2]
+
+    assert enhanced_3b["env"]["SAFETRACE_VLM_ENABLED"] == "true"
+    assert enhanced_3b["env"]["SAFETRACE_VLM_PROFILE"] == "enhanced_3b"
+    assert enhanced_3b["env"]["SAFETRACE_VLM_MODEL_PATH"] == "models/vlm/enhanced-3b"
+    assert enhanced_3b["env"]["SAFETRACE_VLM_ENHANCED_3B_MODEL_PATH"] == "models/vlm/enhanced-3b"
+    assert "Internal evaluation only" in enhanced_3b["notes"][0]
+
+    assert full_lab["env"]["SAFETRACE_VLM_PROFILE"] == "lightweight_512m"
+    assert full_lab["env"]["SAFETRACE_MOBILESAM_WORKER_ENABLED"] == "true"
+    assert "Internal lab only" in full_lab["notes"][0]
 
 
 def test_desktop_manifest_example_shape():
@@ -150,7 +175,7 @@ def test_desktop_manifest_example_shape():
     assert payload["release_runtime_layout"]["fallbackDetector"] == "checkpoints/yolov8s-seg.pt"
     assert payload["release_runtime_layout"]["primaryDetector"] == "checkpoints/yolov9c-seg.pt"
     assert payload["release_runtime_layout"]["mobileSamCheckpoint"] == "checkpoints/mobile_sam.pt"
-    assert payload["release_runtime_layout"]["vlmAssets"] == "models/vlm/lightweight-256m/"
+    assert payload["release_runtime_layout"]["vlmAssets"] is None
     assert payload["frontend"]["dist_path"] == "frontend/dist"
     assert payload["frontend"]["live_frontend_supported"] is True
     assert payload["backend"]["entrypoint"] == "safetrace-backend.exe"
@@ -159,7 +184,7 @@ def test_desktop_manifest_example_shape():
     assert payload["packaged_assets"]["fallbackDetector"] == "checkpoints/yolov8s-seg.pt"
     assert payload["packaged_assets"]["primaryDetector"] == "checkpoints/yolov9c-seg.pt"
     assert payload["packaged_assets"]["chat"].startswith("models/chat/")
-    assert payload["packaged_assets"]["vlm"] == "models/vlm/lightweight-256m/"
+    assert payload["packaged_assets"]["vlm"] is None
     assert payload["packaged_assets"]["enhancedVlmPackaged"] is False
     assert "config/" in payload["preserve_paths"]
     assert "checkpoints/" in payload["preserve_paths"]
@@ -168,6 +193,8 @@ def test_desktop_manifest_example_shape():
     assert "dist/SafeTrace/checkpoints/siglip-base-patch16-224/**" in payload["package_asset_allowlist"]
     assert "dist/SafeTrace/checkpoints/yolov8s-seg.pt" in payload["package_asset_allowlist"]
     assert "dist/SafeTrace/models/vlm/lightweight-256m/**" in payload["package_asset_allowlist"]
+    assert "dist/SafeTrace/models/vlm/lightweight-512m/**" in payload["package_asset_allowlist"]
+    assert "dist/SafeTrace/models/vlm/enhanced-3b/**" in payload["package_asset_allowlist"]
 
 
 def test_package_script_creates_layout_and_excludes_generated_data(tmp_path):
@@ -197,7 +224,7 @@ def test_package_script_creates_layout_and_excludes_generated_data(tmp_path):
     assert (package / "config" / "README.txt").is_file()
     assert (package / "models" / "chat").is_dir()
     assert (package / "models" / "chat" / "model.gguf").read_bytes() == b"model"
-    assert (package / "models" / "vlm" / "lightweight-256m" / "config.json").is_file()
+    assert not (package / "models" / "vlm" / "lightweight-256m").exists()
     assert not (package / "models" / "vlm" / "enhanced-2b").exists()
     assert (package / "checkpoints").is_dir()
     assert (package / "checkpoints" / "README.txt").is_file()
@@ -214,7 +241,11 @@ def test_package_script_creates_layout_and_excludes_generated_data(tmp_path):
     assert summary["primary_detector_included"] is False
     assert summary["mobile_sam_checkpoint_included"] is False
     assert summary["chat_models_included"] == ["model.gguf"]
-    assert summary["vlm_assets_included"] is True
+    assert summary["vlm_assets_included"] is False
+    assert summary["broad_vlm_assets_included"] is False
+    assert summary["selected_vlm_profile"] is None
+    assert summary["selected_vlm_assets_included"] is False
+    assert summary["included_vlm_profiles"] == []
     assert "*.gguf" in summary["excluded_asset_rules"]
     assert PROTECTED_ASSET_RULES == summary["excluded_asset_rules"]
     assert PACKAGE_ASSET_ALLOWLIST == summary["package_asset_allowlist"]
@@ -285,7 +316,10 @@ def test_package_script_can_generate_combined_worker_profile_config(tmp_path):
     assert "SAFETRACE_VLM_PROFILE=lightweight_256m" in env_content
     assert "SAFETRACE_VLM_MODEL_PATH=models/vlm/lightweight-256m" in env_content
     assert "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED=true" in env_content
-    assert "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_TIMEOUT_SECONDS=120" in env_content
+    assert "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_TIMEOUT_SECONDS=60" in env_content
+    assert "SAFETRACE_VLM_FRAME_LIMIT=5" in env_content
+    assert "SAFETRACE_VLM_MAX_EVIDENCE_FRAMES=5" in env_content
+    assert "SAFETRACE_VLM_JOB_TIMEOUT_SECONDS=0" in env_content
     assert "SAFETRACE_VLM_MAX_TOKENS=64" in env_content
     assert manifest["release_profile"] == "SafeTrace_RC_MobileSAM_Worker_LightweightVLM_Worker_Experimental"
     assert manifest["default_runtime"]["mobileSamWorkerEnabled"] is True
@@ -375,10 +409,10 @@ def test_package_script_copies_optional_chat_model_when_present(tmp_path):
     assert "assistant.gguf" in (package / "OPTIONAL_ASSETS_REPORT.txt").read_text(encoding="utf-8")
 
 
-def test_package_script_copies_optional_vlm_assets_when_present(tmp_path):
+def test_package_script_copies_selected_lightweight_512m_assets_when_profile_enabled(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    vlm_dir = repo / "models" / "vlm" / "lightweight-256m"
+    vlm_dir = repo / "models" / "vlm" / "lightweight-512m"
     enhanced_dir = repo / "models" / "vlm" / "enhanced-2b"
     (vlm_dir / "nested").mkdir(parents=True)
     enhanced_dir.mkdir(parents=True)
@@ -386,16 +420,26 @@ def test_package_script_copies_optional_vlm_assets_when_present(tmp_path):
     (vlm_dir / "nested" / "weights.safetensors").write_bytes(b"vlm weights placeholder")
     (enhanced_dir / "model.safetensors").write_bytes(b"enhanced placeholder")
 
-    summary = build_prototype(repo, tmp_path / "out", clean=True)
+    summary = build_prototype(
+        repo,
+        tmp_path / "out",
+        clean=True,
+        release_profile="SafeTrace_RC_Lightweight512M_VLM_Experimental",
+    )
     package = Path(summary["package_root"])
 
-    assert summary["vlm_assets_included"] is True
-    assert (package / "models" / "vlm" / "lightweight-256m" / "config.json").is_file()
+    assert summary["vlm_assets_included"] is False
+    assert summary["broad_vlm_assets_included"] is False
+    assert summary["selected_vlm_profile"] == "lightweight_512m"
+    assert summary["selected_vlm_assets_included"] is True
+    assert summary["included_vlm_profiles"] == ["lightweight-512m"]
+    assert (package / "models" / "vlm" / "lightweight-512m" / "config.json").is_file()
     assert (
-        package / "models" / "vlm" / "lightweight-256m" / "nested" / "weights.safetensors"
+        package / "models" / "vlm" / "lightweight-512m" / "nested" / "weights.safetensors"
     ).read_bytes() == b"vlm weights placeholder"
+    assert not (package / "models" / "vlm" / "lightweight-256m").exists()
     assert not (package / "models" / "vlm" / "enhanced-2b").exists()
-    assert "lightweight VLM assets: included" in (package / "OPTIONAL_ASSETS_REPORT.txt").read_text(
+    assert "VLM assets: included" in (package / "OPTIONAL_ASSETS_REPORT.txt").read_text(
         encoding="utf-8"
     )
 
@@ -413,6 +457,9 @@ def test_package_script_non_strict_allows_missing_release_assets(tmp_path):
     assert summary["mobile_sam_checkpoint_included"] is False
     assert summary["chat_models_included"] == []
     assert summary["vlm_assets_included"] is False
+    assert summary["broad_vlm_assets_included"] is False
+    assert summary["selected_vlm_assets_included"] is False
+    assert summary["included_vlm_profiles"] == []
     assert summary["strict_asset_failures"]
 
 
@@ -444,14 +491,7 @@ def test_package_script_strict_assets_passes_with_release_assets(tmp_path):
     backend_exe.write_bytes(b"exe")
     (repo / "config").mkdir()
     (repo / "config" / "safetrace.env").write_text(
-        "\n".join(
-            [
-                "SAFETRACE_CHAT_ENABLED=auto",
-                "SAFETRACE_CHAT_PROVIDER=packaged_llamacpp",
-                "SAFETRACE_VLM_ENABLED=auto",
-                "SAFETRACE_VLM_PROVIDER=auto",
-            ]
-        ),
+        "\n".join(["SAFETRACE_CHAT_ENABLED=auto", "SAFETRACE_CHAT_PROVIDER=packaged_llamacpp"]),
         encoding="utf-8",
     )
     mobile_sam = repo / "checkpoints" / "mobile_sam.pt"
@@ -464,10 +504,6 @@ def test_package_script_strict_assets_passes_with_release_assets(tmp_path):
     chat_model = repo / "models" / "chat" / "assistant.gguf"
     chat_model.parent.mkdir(parents=True)
     chat_model.write_bytes(b"chat")
-    vlm_dir = repo / "models" / "vlm" / "lightweight-256m"
-    vlm_dir.mkdir(parents=True)
-    (vlm_dir / "config.json").write_text("{}", encoding="utf-8")
-
     summary = build_prototype(repo, tmp_path / "out", clean=True, strict_assets=True)
     package = Path(summary["package_root"])
 
@@ -479,9 +515,61 @@ def test_package_script_strict_assets_passes_with_release_assets(tmp_path):
     assert not (package / "checkpoints" / "yolov9c-seg.pt").exists()
     assert (package / "checkpoints" / "mobile_sam.pt").is_file()
     assert (package / "models" / "chat" / "assistant.gguf").is_file()
-    assert (package / "models" / "vlm" / "lightweight-256m" / "config.json").is_file()
+    assert not (package / "models" / "vlm" / "lightweight-256m").exists()
     assert not (package / "models" / "vlm" / "enhanced-2b").exists()
     assert (package / "OPTIONAL_ASSETS_REPORT.txt").is_file()
+
+
+def test_package_script_strict_assets_checks_selected_512m_candidate(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    backend_exe = repo / DEFAULT_DIST_DIR / BACKEND_EXE_NAME
+    backend_exe.parent.mkdir(parents=True)
+    backend_exe.write_bytes(b"exe")
+    (repo / "config").mkdir()
+    (repo / "config" / "safetrace.env").write_text("", encoding="utf-8")
+    mobile_sam = repo / "checkpoints" / "mobile_sam.pt"
+    mobile_sam.parent.mkdir(parents=True)
+    mobile_sam.write_bytes(b"mobile sam")
+    siglip_dir = repo / "checkpoints" / "siglip-base-patch16-224"
+    siglip_dir.mkdir()
+    (siglip_dir / "config.json").write_text("{}", encoding="utf-8")
+    (repo / "checkpoints" / "yolov8s-seg.pt").write_bytes(b"yolov8")
+    chat_model = repo / "models" / "chat" / "assistant.gguf"
+    chat_model.parent.mkdir(parents=True)
+    chat_model.write_bytes(b"chat")
+
+    try:
+        build_prototype(
+            repo,
+            tmp_path / "out",
+            clean=True,
+            strict_assets=True,
+            release_profile="SafeTrace_RC_Lightweight512M_VLM_Experimental",
+        )
+    except AssetValidationError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("strict 512M profile should fail without 512M assets")
+
+    assert "models/vlm/lightweight-512m/" in message
+
+    vlm_dir = repo / "models" / "vlm" / "lightweight-512m"
+    vlm_dir.mkdir(parents=True)
+    (vlm_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    summary = build_prototype(
+        repo,
+        tmp_path / "out2",
+        clean=True,
+        strict_assets=True,
+        release_profile="SafeTrace_RC_Lightweight512M_VLM_Experimental",
+    )
+    package = Path(summary["package_root"])
+
+    assert summary["strict_asset_failures"] == []
+    assert (package / "models" / "vlm" / "lightweight-512m" / "config.json").is_file()
+    assert not (package / "models" / "vlm" / "enhanced-3b").exists()
 
 
 def test_backend_entrypoint_imports_and_loads_env(monkeypatch, tmp_path):
@@ -547,7 +635,9 @@ def test_backend_entrypoint_packaged_defaults(monkeypatch, tmp_path):
         "SAFETRACE_VLM_MODEL_PATH",
         "SAFETRACE_VLM_DIR",
         "SAFETRACE_VLM_LIGHTWEIGHT_MODEL_PATH",
+        "SAFETRACE_VLM_LIGHTWEIGHT_512M_MODEL_PATH",
         "SAFETRACE_VLM_ENHANCED_MODEL_PATH",
+        "SAFETRACE_VLM_ENHANCED_3B_MODEL_PATH",
         "SAFETRACE_VLM_MODEL",
         "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED",
         "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_TIMEOUT_SECONDS",
@@ -586,7 +676,11 @@ def test_backend_entrypoint_packaged_defaults(monkeypatch, tmp_path):
     assert Path(os.environ["SAFETRACE_VLM_LIGHTWEIGHT_MODEL_PATH"]) == (
         tmp_path / "models" / "vlm" / "lightweight-256m"
     )
+    assert Path(os.environ["SAFETRACE_VLM_LIGHTWEIGHT_512M_MODEL_PATH"]) == (
+        tmp_path / "models" / "vlm" / "lightweight-512m"
+    )
     assert Path(os.environ["SAFETRACE_VLM_ENHANCED_MODEL_PATH"]) == tmp_path / "models" / "vlm" / "enhanced-2b"
+    assert Path(os.environ["SAFETRACE_VLM_ENHANCED_3B_MODEL_PATH"]) == tmp_path / "models" / "vlm" / "enhanced-3b"
     assert os.environ["SAFETRACE_VLM_MODEL"] == "local-vlm"
     assert os.environ["SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED"] == "false"
     assert os.environ["SAFETRACE_LIGHTWEIGHT_VLM_WORKER_TIMEOUT_SECONDS"] == "60"

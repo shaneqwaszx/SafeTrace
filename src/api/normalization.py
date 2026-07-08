@@ -12,6 +12,30 @@ from src.preprocessing import build_processing_metadata
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+EVIDENCE_STRENGTH_RANK = {
+    "unsupported_rule": 0,
+    "insufficient_evidence": 1,
+    "review_candidate": 2,
+    "likely_violation": 3,
+    "confirmed_violation": 4,
+}
+
+
+def default_evidence_strength(confidence: float) -> str:
+    if confidence >= 0.8:
+        return "confirmed_violation"
+    if confidence >= 0.6:
+        return "likely_violation"
+    if confidence > 0:
+        return "review_candidate"
+    return "insufficient_evidence"
+
+
+def strongest_evidence_strength(values: Iterable[str]) -> str:
+    normalized = [str(value or "").strip() for value in values if value]
+    if not normalized:
+        return "insufficient_evidence"
+    return max(normalized, key=lambda value: EVIDENCE_STRENGTH_RANK.get(value, 0))
 
 
 def humanize_violation_name(value: str) -> str:
@@ -96,6 +120,14 @@ def normalize_pipeline_results(
             confidence = float(raw_violation.get("confidence") or 0.0)
             description = str(raw_violation.get("description") or "")
             name = humanize_violation_name(violation_id)
+            evidence = dict(raw_violation.get("evidence") or {})
+            evidence_strength = str(
+                evidence.get("evidenceStrength") or default_evidence_strength(confidence)
+            )
+            confidence_reason = str(
+                evidence.get("confidenceReason")
+                or "Confidence is derived from detector/rule overlap and calibrated evidence strength."
+            )
 
             frame_violations.append(
                 {
@@ -104,6 +136,17 @@ def normalize_pipeline_results(
                     "severity": severity,
                     "confidence": confidence,
                     "description": description,
+                    "evidence": evidence,
+                    "evidenceStrength": evidence_strength,
+                    "confidenceReason": confidence_reason,
+                    "reviewRequired": bool(evidence.get("reviewRequired")),
+                    "ruleSupport": evidence.get("ruleSupport"),
+                    "suppressedFindings": evidence.get("suppressedFindings") or [],
+                    "unsupportedRuleReason": evidence.get("unsupportedRuleReason"),
+                    "verifierAgreement": evidence.get("verifierAgreement"),
+                    "verifierDisagreementReason": evidence.get("verifierDisagreementReason"),
+                    "verifierConfidenceHint": evidence.get("verifierConfidenceHint"),
+                    "finalReviewerNote": evidence.get("finalReviewerNote"),
                 }
             )
 
@@ -116,6 +159,13 @@ def normalize_pipeline_results(
                     "description": description,
                     "affectedFrames": [],
                     "confidences": [],
+                    "evidenceStrengths": [],
+                    "confidenceReasons": [],
+                    "reviewRequired": False,
+                    "ruleSupport": evidence.get("ruleSupport"),
+                    "verifierAgreement": evidence.get("verifierAgreement"),
+                    "verifierDisagreementReason": evidence.get("verifierDisagreementReason"),
+                    "finalReviewerNote": evidence.get("finalReviewerNote"),
                 },
             )
             if SEVERITY_RANK.get(severity, 0) > SEVERITY_RANK.get(group["severity"], 0):
@@ -126,9 +176,22 @@ def normalize_pipeline_results(
                     "frameNumber": index,
                     "timestamp": timestamp,
                     "confidence": confidence,
+                    "evidenceStrength": evidence_strength,
+                    "confidenceReason": confidence_reason,
+                    "verifierAgreement": evidence.get("verifierAgreement"),
                 }
             )
             group["confidences"].append(confidence)
+            group["evidenceStrengths"].append(evidence_strength)
+            group["confidenceReasons"].append(confidence_reason)
+            group["reviewRequired"] = bool(group.get("reviewRequired") or evidence.get("reviewRequired"))
+            if evidence.get("verifierAgreement") == "disagrees":
+                group["verifierAgreement"] = "disagrees"
+                group["verifierDisagreementReason"] = evidence.get("verifierDisagreementReason")
+            elif not group.get("verifierAgreement") and evidence.get("verifierAgreement"):
+                group["verifierAgreement"] = evidence.get("verifierAgreement")
+            if evidence.get("finalReviewerNote"):
+                group["finalReviewerNote"] = evidence.get("finalReviewerNote")
 
         image_url, image_message = copy_annotated_image(
             job_id=job_id,
@@ -164,11 +227,15 @@ def normalize_pipeline_results(
     grouped_violations: List[Dict[str, Any]] = []
     for group in grouped.values():
         confidences = group.pop("confidences")
+        evidence_strengths = group.pop("evidenceStrengths", [])
+        confidence_reasons = group.pop("confidenceReasons", [])
         grouped_violations.append(
             {
                 **group,
                 "confidenceMin": min(confidences),
                 "confidenceMax": max(confidences),
+                "evidenceStrength": strongest_evidence_strength(evidence_strengths),
+                "confidenceReasons": sorted(set(str(reason) for reason in confidence_reasons if reason)),
             }
         )
     grouped_violations.sort(
