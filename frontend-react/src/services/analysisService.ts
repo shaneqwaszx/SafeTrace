@@ -69,6 +69,7 @@ type BackendMedia = {
   type: MediaType;
   sizeBytes: number;
   durationSeconds?: number | null;
+  jobId?: string | null;
 };
 
 type BackendViolation = {
@@ -88,6 +89,20 @@ type BackendViolation = {
   verifierDisagreementReason?: string | null;
   verifierConfidenceHint?: string | null;
   finalReviewerNote?: string | null;
+  originProfileId?: string | null;
+  originProfileLabel?: string | null;
+  originRule?: string | null;
+  profileApplicability?: { applicable?: boolean; reason?: string; evaluatedAsProfileId?: string } | null;
+  reviewLevel?: string | null;
+  deduplicationKey?: string | null;
+  findingId?: string | null;
+  evidenceId?: string | null;
+  jobId?: string | null;
+  batchId?: string | null;
+  sourceChecksum?: string | null;
+  originalFilename?: string | null;
+  sourceRelativePath?: string | null;
+  sourceGroupPath?: string | null;
 };
 
 type BackendGroupedViolation = {
@@ -103,6 +118,13 @@ type BackendGroupedViolation = {
   }>;
   confidenceMin: number;
   confidenceMax: number;
+  findingId?: string | null;
+  jobId?: string | null;
+  batchId?: string | null;
+  sourceChecksum?: string | null;
+  originalFilename?: string | null;
+  sourceRelativePath?: string | null;
+  sourceGroupPath?: string | null;
 };
 
 type BackendFrameResult = {
@@ -116,6 +138,22 @@ type BackendFrameResult = {
   explanationSource?: 'vlm' | 'vlm_local' | 'vlm_ollama' | 'vlm_lightweight' | 'vlm_enhanced' | 'rule_template_plus_vlm' | 'rule_template_plus_lightweight_vlm' | 'rule_template_plus_lightweight_plus_enhanced' | 'rule_based' | null;
   violations: BackendViolation[];
   technicalEvidence: Record<string, unknown>;
+  sourceMetadata?: Record<string, unknown>;
+  videoFilename?: string | null;
+  sourceRelativePath?: string | null;
+  sourceGroup?: string | null;
+  batchId?: string | null;
+  jobId?: string | null;
+  findingId?: string | null;
+  findingIds?: string[] | null;
+  evidenceId?: string | null;
+  mediaArtifactId?: string | null;
+  sourceChecksum?: string | null;
+  originalFilename?: string | null;
+  sourceGroupPath?: string | null;
+  timestampSeconds?: number | null;
+  timestampLabel?: string | null;
+  sourceFrameIndex?: number | null;
 };
 
 type BackendViolationEvent = {
@@ -136,12 +174,53 @@ type BackendViolationEvent = {
     timestamp: string;
     confidence: number;
     imageUrl?: string | null;
+    evidenceId?: string | null;
+    mediaArtifactId?: string | null;
+    jobId?: string | null;
+    batchId?: string | null;
+    sourceChecksum?: string | null;
+    originalFilename?: string | null;
+    sourceRelativePath?: string | null;
+    sourceGroupPath?: string | null;
   }>;
+  eventId?: string | null;
+  jobId?: string | null;
+  batchId?: string | null;
+  sourceChecksum?: string | null;
+  originalFilename?: string | null;
+  sourceRelativePath?: string | null;
+  sourceGroupPath?: string | null;
 };
 
 type BackendAnalysisResult = {
   jobId: string;
   status: 'completed';
+  reviewMode?: 'fast_local' | 'comprehensive' | string;
+  createdAt?: string | null;
+  queuedAt?: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  completedAt?: string | null;
+  elapsedSeconds?: number | null;
+  queueWaitSeconds?: number | null;
+  analysisRuntimeSeconds?: number | null;
+  requestedModeLabel?: string | null;
+  requestedVisualExplanationMode?: string | null;
+  actualExplanationMode?: string | null;
+  finalExplanationSource?: string | null;
+  explanationOutcome?: string | null;
+  explanationOutcomeLabel?: string | null;
+  vlmAttempted?: boolean | null;
+  lightweightVlmAttempted?: boolean | null;
+  enhancedVlmAttempted?: boolean | null;
+  vlmAccepted?: boolean | null;
+  lightweightVlmAccepted?: boolean | null;
+  enhancedVlmAccepted?: boolean | null;
+  vlmFallbackReason?: string | null;
+  vlmFallbackReasonLabel?: string | null;
+  actualDeviceLabel?: string | null;
+  jobRuntimeLabel?: string | null;
+  engineRuntimeSummary?: AnalysisResult['engineRuntimeSummary'];
   media: BackendMedia;
   query: string;
   summary: {
@@ -154,11 +233,23 @@ type BackendAnalysisResult = {
     eventTypes?: string[];
     overallConfidence?: number;
     keyEvents?: unknown[];
+    violationsDetected?: boolean;
+    acceptedFindingCount?: number;
+    evidenceStatus?: string;
   };
   violations: BackendGroupedViolation[];
   events?: BackendViolationEvent[];
   frames: BackendFrameResult[];
+  evidenceStatus?: string;
+  analysisSetup?: AnalysisResult['analysisSetup'];
   technicalDetails?: Record<string, unknown> | null;
+  batchId?: string | null;
+  sourceChecksum?: string | null;
+  originalFilename?: string | null;
+  sourceRelativePath?: string | null;
+  sourceGroupPath?: string | null;
+  executionIdentity?: Record<string, unknown>;
+  resultSchemaVersion?: number;
 };
 
 function serializeUseCaseProfile(profile?: UseCaseProfileSelection): string | undefined {
@@ -353,23 +444,42 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 function cloneResult(result: AnalysisResult): AnalysisResult {
-  return {
-    ...result,
-    media: { ...result.media },
-    frames: result.frames.map((frame) => ({
-      ...frame,
-      violations: frame.violations.map((violation) => ({
-        ...violation,
-        evidence: violation.evidence ? { ...violation.evidence } : undefined,
-      })),
-      detections: frame.detections.map((detection) => ({ ...detection })),
-      technicalEvidence: { ...frame.technicalEvidence },
-    })),
-    events: result.events?.map((event) => ({
-      ...event,
-      supportingFrames: event.supportingFrames.map((frame) => ({ ...frame })),
-    })),
-  };
+  return JSON.parse(JSON.stringify(result)) as AnalysisResult;
+}
+
+export function assertBackendResultOwnership(result: BackendAnalysisResult, expectedJobId: string): void {
+  const issues: string[] = [];
+  if (result.jobId !== expectedJobId) issues.push(`result.jobId=${result.jobId}`);
+  if (result.media.jobId !== expectedJobId) issues.push(`media.jobId=${String(result.media.jobId)}`);
+  result.frames.forEach((frame, index) => {
+    if (frame.jobId !== expectedJobId) issues.push(`frames[${index}].jobId=${String(frame.jobId)}`);
+    if (!String(frame.evidenceId || '').startsWith(`${expectedJobId}:`)) {
+      issues.push(`frames[${index}].evidenceId=${String(frame.evidenceId)}`);
+    }
+    const mediaJob = String(frame.imageUrl || '').match(/\/api\/media\/([^/]+)\//)?.[1];
+    if (mediaJob && mediaJob !== expectedJobId) issues.push(`frames[${index}].imageUrl=${String(frame.imageUrl)}`);
+    frame.violations.forEach((violation, violationIndex) => {
+      if (violation.jobId !== expectedJobId) {
+        issues.push(`frames[${index}].violations[${violationIndex}].jobId=${String(violation.jobId)}`);
+      }
+    });
+  });
+  result.violations.forEach((finding, index) => {
+    if (finding.jobId !== expectedJobId) issues.push(`violations[${index}].jobId=${String(finding.jobId)}`);
+  });
+  result.events?.forEach((event, eventIndex) => {
+    if ((event as BackendViolationEvent & { jobId?: string }).jobId !== expectedJobId) {
+      issues.push(`events[${eventIndex}].jobId=${String((event as BackendViolationEvent & { jobId?: string }).jobId)}`);
+    }
+    event.supportingFrames.forEach((frame, frameIndex) => {
+      if ((frame as typeof frame & { jobId?: string }).jobId !== expectedJobId) {
+        issues.push(`events[${eventIndex}].supportingFrames[${frameIndex}].jobId=${String((frame as typeof frame & { jobId?: string }).jobId)}`);
+      }
+    });
+  });
+  if (issues.length) {
+    throw new Error(`cross_job_result_contamination: ${issues.join('; ')}`);
+  }
 }
 
 function toSeverity(value: string | undefined): Severity {
@@ -488,6 +598,20 @@ function mapViolations(violations: BackendViolation[]): Violation[] {
     verifierDisagreementReason: violation.verifierDisagreementReason,
     verifierConfidenceHint: violation.verifierConfidenceHint,
     finalReviewerNote: violation.finalReviewerNote,
+    originProfileId: violation.originProfileId,
+    originProfileLabel: violation.originProfileLabel,
+    originRule: violation.originRule,
+    profileApplicability: violation.profileApplicability,
+    reviewLevel: violation.reviewLevel,
+    deduplicationKey: violation.deduplicationKey,
+    findingId: violation.findingId ?? undefined,
+    evidenceId: violation.evidenceId ?? undefined,
+    jobId: violation.jobId ?? undefined,
+    batchId: violation.batchId ?? undefined,
+    sourceChecksum: violation.sourceChecksum ?? undefined,
+    originalFilename: violation.originalFilename ?? undefined,
+    sourceRelativePath: violation.sourceRelativePath ?? undefined,
+    sourceGroupPath: violation.sourceGroupPath ?? undefined,
   }));
 }
 
@@ -587,10 +711,38 @@ function mapEvents(events: BackendViolationEvent[] | undefined): ViolationEvent[
     confidenceMin: event.confidenceMin,
     confidenceMax: event.confidenceMax,
     supportingFrameCount: event.supportingFrameCount,
+    eventId: event.eventId ?? undefined,
+    jobId: event.jobId ?? undefined,
+    batchId: event.batchId ?? undefined,
+    sourceChecksum: event.sourceChecksum ?? undefined,
+    originalFilename: event.originalFilename ?? undefined,
+    sourceRelativePath: event.sourceRelativePath ?? undefined,
+    sourceGroupPath: event.sourceGroupPath ?? undefined,
     supportingFrames: event.supportingFrames.map((frame) => ({
       ...frame,
+      evidenceId: frame.evidenceId ?? undefined,
+      mediaArtifactId: frame.mediaArtifactId ?? undefined,
+      jobId: frame.jobId ?? undefined,
+      batchId: frame.batchId ?? undefined,
+      sourceChecksum: frame.sourceChecksum ?? undefined,
+      originalFilename: frame.originalFilename ?? undefined,
+      sourceRelativePath: frame.sourceRelativePath ?? undefined,
+      sourceGroupPath: frame.sourceGroupPath ?? undefined,
       imageUrl: resolveBackendMediaUrl(frame.imageUrl ?? null),
     })),
+  }));
+}
+
+function mapGroupedViolations(violations: BackendGroupedViolation[]): NonNullable<AnalysisResult['violations']> {
+  return violations.map((finding) => ({
+    ...finding,
+    findingId: finding.findingId ?? undefined,
+    jobId: finding.jobId ?? undefined,
+    batchId: finding.batchId ?? undefined,
+    sourceChecksum: finding.sourceChecksum ?? undefined,
+    originalFilename: finding.originalFilename ?? undefined,
+    sourceRelativePath: finding.sourceRelativePath ?? undefined,
+    sourceGroupPath: finding.sourceGroupPath ?? undefined,
   }));
 }
 
@@ -605,6 +757,40 @@ function mapBackendResult(result: BackendAnalysisResult): AnalysisResult {
   return {
     jobId: result.jobId,
     status: result.status,
+    createdAt: result.createdAt ?? null,
+    queuedAt: result.queuedAt ?? null,
+    startedAt: result.startedAt ?? null,
+    finishedAt: result.finishedAt ?? null,
+    completedAt: result.completedAt ?? null,
+    elapsedSeconds: result.elapsedSeconds ?? null,
+    queueWaitSeconds: result.queueWaitSeconds ?? null,
+    analysisRuntimeSeconds: result.analysisRuntimeSeconds ?? null,
+    requestedModeLabel: result.requestedModeLabel ?? null,
+    requestedVisualExplanationMode: result.requestedVisualExplanationMode ?? null,
+    actualExplanationMode: result.actualExplanationMode ?? null,
+    finalExplanationSource: result.finalExplanationSource ?? null,
+    explanationOutcome: result.explanationOutcome ?? null,
+    explanationOutcomeLabel: result.explanationOutcomeLabel ?? null,
+    vlmAttempted: result.vlmAttempted ?? null,
+    lightweightVlmAttempted: result.lightweightVlmAttempted ?? null,
+    enhancedVlmAttempted: result.enhancedVlmAttempted ?? null,
+    vlmAccepted: result.vlmAccepted ?? null,
+    lightweightVlmAccepted: result.lightweightVlmAccepted ?? null,
+    enhancedVlmAccepted: result.enhancedVlmAccepted ?? null,
+    vlmFallbackReason: result.vlmFallbackReason ?? null,
+    vlmFallbackReasonLabel: result.vlmFallbackReasonLabel ?? null,
+    actualDeviceLabel: result.actualDeviceLabel ?? null,
+    jobRuntimeLabel: result.jobRuntimeLabel ?? null,
+    engineRuntimeSummary: result.engineRuntimeSummary ?? null,
+    batchId: result.batchId ?? null,
+    sourceChecksum: result.sourceChecksum ?? null,
+    originalFilename: result.originalFilename ?? undefined,
+    sourceRelativePath: result.sourceRelativePath ?? undefined,
+    sourceGroupPath: result.sourceGroupPath ?? undefined,
+    executionIdentity: result.executionIdentity,
+    resultSchemaVersion: result.resultSchemaVersion,
+    evidenceStatus: result.evidenceStatus ?? result.summary.evidenceStatus,
+    analysisSetup: result.analysisSetup ?? null,
     id: result.jobId,
     query: result.query,
     media: {
@@ -619,9 +805,16 @@ function mapBackendResult(result: BackendAnalysisResult): AnalysisResult {
       jobId: result.jobId,
       selectedJobId: result.jobId,
       useCaseProfile,
+      jobRuntimeLabel: result.jobRuntimeLabel ?? result.engineRuntimeSummary?.runtime ?? null,
+      requestedModeLabel: result.requestedModeLabel ?? result.engineRuntimeSummary?.requestedMode ?? null,
+      actualReviewLabel: result.explanationOutcomeLabel ?? result.engineRuntimeSummary?.actualReview ?? null,
+      actualDeviceLabel: result.actualDeviceLabel ?? result.engineRuntimeSummary?.device ?? null,
+      vlmStatusLabel: result.engineRuntimeSummary?.vlm ?? null,
+      mobileSamStatusLabel: result.engineRuntimeSummary?.mobileSam ?? null,
+      elapsedSeconds: result.elapsedSeconds ?? null,
     },
     summary: result.summary,
-    violations: result.violations,
+    violations: mapGroupedViolations(result.violations),
     events: mapEvents(result.events),
     framesAnalyzed: result.summary.framesAnalyzed,
     generatedAt: new Date().toISOString(),
@@ -634,6 +827,7 @@ function mapBackendResult(result: BackendAnalysisResult): AnalysisResult {
       vlmEnabled: false,
       enhancedVlmExplanations: false,
       deviceMode: 'Auto',
+      reviewMode: (result.reviewMode === 'comprehensive' ? 'comprehensive' : 'fast_local'),
       useCaseProfile,
     } : undefined,
     frames: result.frames.map((frame) => {
@@ -659,6 +853,22 @@ function mapBackendResult(result: BackendAnalysisResult): AnalysisResult {
         violations,
         detections: mapDetections(frame),
         technicalEvidence: frame.technicalEvidence,
+        sourceMetadata: frame.sourceMetadata,
+        videoFilename: frame.videoFilename ?? undefined,
+        sourceRelativePath: frame.sourceRelativePath ?? undefined,
+        sourceGroup: frame.sourceGroup ?? undefined,
+        batchId: frame.batchId ?? undefined,
+        jobId: frame.jobId ?? result.jobId,
+        findingId: frame.findingId ?? undefined,
+        findingIds: frame.findingIds ?? undefined,
+        evidenceId: frame.evidenceId ?? undefined,
+        mediaArtifactId: frame.mediaArtifactId ?? undefined,
+        sourceChecksum: frame.sourceChecksum ?? undefined,
+        originalFilename: frame.originalFilename ?? undefined,
+        sourceGroupPath: frame.sourceGroupPath ?? undefined,
+        timestampSeconds: frame.timestampSeconds ?? undefined,
+        timestampLabel: frame.timestampLabel ?? frame.timestamp,
+        sourceFrameIndex: frame.sourceFrameIndex ?? undefined,
       };
     }),
     technicalDetails: result.technicalDetails,
@@ -766,6 +976,7 @@ export async function runBackendAnalysis(request: AnalysisRequest): Promise<Anal
   if (typeof request.vlmEnabled === 'boolean') formData.append('vlmEnabled', String(request.vlmEnabled));
   const useCaseProfile = serializeUseCaseProfile(request.useCaseProfile);
   if (useCaseProfile) formData.append('useCaseProfile', useCaseProfile);
+  formData.append('reviewMode', request.reviewMode ?? 'fast_local');
   formData.append('device', deviceToApiMode(request.device));
 
   return apiFetch<AnalysisJob>('analyze', {
@@ -778,6 +989,8 @@ export async function runBackendBatchAnalysis(request: BatchAnalysisRequest): Pr
   const formData = new FormData();
   request.files.forEach((file) => {
     formData.append('files', file);
+    const relativePath = file.webkitRelativePath || file.name;
+    formData.append('relativePaths', relativePath);
   });
   formData.append('query', request.query);
   formData.append('fps', String(request.fps));
@@ -787,6 +1000,8 @@ export async function runBackendBatchAnalysis(request: BatchAnalysisRequest): Pr
   if (typeof request.vlmEnabled === 'boolean') formData.append('vlmEnabled', String(request.vlmEnabled));
   const useCaseProfile = serializeUseCaseProfile(request.useCaseProfile);
   if (useCaseProfile) formData.append('useCaseProfile', useCaseProfile);
+  formData.append('reviewMode', request.reviewMode ?? 'fast_local');
+  if (request.importKey) formData.append('importKey', request.importKey);
   formData.append('device', deviceToApiMode(request.device));
 
   return apiFetch<BatchStatus>('batches/analyze', {
@@ -803,13 +1018,113 @@ export async function getBatchStatus(batchId: string): Promise<BatchStatus> {
   return apiFetch<BatchStatus>(`batches/${encodeURIComponent(batchId)}`);
 }
 
-export async function getJobResult(jobId: string): Promise<AnalysisResult> {
-  const result = await apiFetch<BackendAnalysisResult>(`jobs/${encodeURIComponent(jobId)}/result`);
+export async function getRecoverySummary(): Promise<import('../types/analysis').RecoverySummary> {
+  return apiFetch('recovery');
+}
+
+export async function resumeRecovery(jobIds: string[]): Promise<Record<string, unknown>> {
+  return apiFetch('recovery/resume', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jobIds }) });
+}
+
+export async function restartRecoveryFresh(
+  jobIds: string[],
+  options: { batchIds?: string[]; purgeCompatibleCache?: boolean } = {},
+): Promise<Record<string, unknown>> {
+  const purgeCompatibleCache = options.purgeCompatibleCache === true;
+  return apiFetch('recovery/restart-fresh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jobIds,
+      batchIds: options.batchIds ?? [],
+      confirmRestartFresh: true,
+      purgeCompatibleCache,
+      confirmPurgeCompatibleCache: purgeCompatibleCache,
+    }),
+  });
+}
+
+export async function deferRecovery(jobIds: string[]): Promise<Record<string, unknown>> {
+  return apiFetch('recovery/later', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jobIds }) });
+}
+
+export async function discardRecovery(jobIds: string[]): Promise<Record<string, unknown>> {
+  return apiFetch('recovery/discard', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jobIds }) });
+}
+
+export async function getStorageSummary(): Promise<import('../types/analysis').StorageSummary> {
+  return apiFetch('storage/summary');
+}
+
+export async function previewStorageCleanup(scopes: string[]): Promise<Record<string, unknown>> {
+  return apiFetch('storage/cleanup/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scopes }) });
+}
+
+export async function applyStorageCleanup(scopes: string[]): Promise<Record<string, unknown>> {
+  return apiFetch('storage/cleanup/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scopes, confirm: true }) });
+}
+
+export async function getDashboardSummary(): Promise<import('../types/analysis').DashboardSummary> {
+  return apiFetch('dashboard/summary');
+}
+
+export async function getJobsPage(page = 1, pageSize = 25): Promise<import('../types/analysis').PaginatedResponse<JobStatus>> {
+  return apiFetch(`jobs?page=${page}&pageSize=${pageSize}`);
+}
+
+export async function getBatchesPage(page = 1, pageSize = 25): Promise<import('../types/analysis').PaginatedResponse<BatchStatus>> {
+  return apiFetch(`batches?page=${page}&pageSize=${pageSize}`);
+}
+
+export async function getExportsPage(page = 1, pageSize = 25): Promise<import('../types/analysis').PaginatedResponse<import('../types/analysis').ExportSummary>> {
+  return apiFetch(`exports?page=${page}&pageSize=${pageSize}`);
+}
+
+export async function getCleanupHistory(page = 1, pageSize = 25): Promise<import('../types/analysis').PaginatedResponse<Record<string, unknown>>> {
+  return apiFetch(`storage/cleanup/history?page=${page}&pageSize=${pageSize}`);
+}
+
+export async function pinJob(jobId: string): Promise<Record<string, unknown>> {
+  return apiFetch(`jobs/${encodeURIComponent(jobId)}/pin`, { method: 'POST' });
+}
+
+export async function unpinJob(jobId: string): Promise<Record<string, unknown>> {
+  return apiFetch(`jobs/${encodeURIComponent(jobId)}/unpin`, { method: 'POST' });
+}
+
+export async function exportJob(jobId: string, selectedEvidenceIds: string[] = []): Promise<import('../types/analysis').ExportSummary> {
+  return apiFetch(`jobs/${encodeURIComponent(jobId)}/export`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ selectedEvidenceIds, includeEvidenceImages: true }) });
+}
+
+export async function exportAndDeleteJob(jobId: string): Promise<Record<string, unknown>> {
+  return apiFetch(`jobs/${encodeURIComponent(jobId)}/export-and-delete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirmDelete: true, includeEvidenceImages: true }) });
+}
+
+export async function deleteExport(exportId: string): Promise<Record<string, unknown>> {
+  return apiFetch(`exports/${encodeURIComponent(exportId)}`, { method: 'DELETE' });
+}
+
+export async function retryFailedBatchJobs(batchId: string): Promise<Record<string, unknown>> {
+  return apiFetch(`batches/${encodeURIComponent(batchId)}/retry-failed`, { method: 'POST' });
+}
+
+export async function pauseBatch(batchId: string): Promise<Record<string, unknown>> {
+  return apiFetch(`batches/${encodeURIComponent(batchId)}/pause`, { method: 'POST' });
+}
+
+export async function resumeBatch(batchId: string): Promise<Record<string, unknown>> {
+  return apiFetch(`batches/${encodeURIComponent(batchId)}/resume`, { method: 'POST' });
+}
+
+export async function getJobResult(jobId: string, signal?: AbortSignal): Promise<AnalysisResult> {
+  const result = await apiFetch<BackendAnalysisResult>(`jobs/${encodeURIComponent(jobId)}/result`, { signal });
+  assertBackendResultOwnership(result, jobId);
   return mapBackendResult(result);
 }
 
 export async function getTechnicalReport(jobId: string): Promise<AnalysisResult> {
   const result = await apiFetch<BackendAnalysisResult>(`reports/${encodeURIComponent(jobId)}/technical-json`);
+  assertBackendResultOwnership(result, jobId);
   return mapBackendResult(result);
 }
 

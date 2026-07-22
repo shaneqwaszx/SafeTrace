@@ -153,6 +153,8 @@ export function EvidenceFrameVisual({ frame }: EvidenceFrameVisualProps) {
         <img
           className="h-full w-full object-contain"
           src={frame.imageUrl}
+          loading="lazy"
+          decoding="async"
           alt={`Annotated evidence frame ${frame.frameNumber} at ${frame.timestamp}`}
           onError={() => setImageFailed(true)}
         />

@@ -4,7 +4,8 @@
   "build_mode": "release-package-prototype",
   "requires_frontend_version": ">=0.0.0",
   "schema_version": 1,
-  "entrypoint": "safetrace-backend.exe",
+  "entrypoint": "safetrace-backend/safetrace-backend.exe",
+  "legacy_entrypoint": "safetrace-backend.exe",
   "external_assets": {
     "config": "config/safetrace.env",
     "data": "data/",

@@ -1191,7 +1191,7 @@ def test_pipeline_safe_mode_uses_mobile_sam_worker_after_frame_selection(monkeyp
         checkpoint = "checkpoints/yolov8s-seg.pt"
 
         def detect(self, image):  # noqa: ARG002
-            return [make_detection("person")]
+            return [make_detection("person"), make_detection("head")]
 
     class FakeWorker:
         available = True
@@ -1276,7 +1276,7 @@ def test_pipeline_safe_mode_uses_lightweight_vlm_worker_after_frame_selection(mo
         checkpoint = "checkpoints/yolov8s-seg.pt"
 
         def detect(self, image):  # noqa: ARG002
-            return [make_detection("person")]
+            return [make_detection("person"), make_detection("head")]
 
     class FakeVlmWorker:
         provider = "vlm_lightweight_worker"
@@ -1368,7 +1368,7 @@ def test_pipeline_safe_mode_uses_lightweight_vlm_worker_after_frame_selection(mo
     assert lightweight["baseExplanationSource"] == "rule_based"
     assert lightweight["finalExplanationSource"] == "rule_template_plus_lightweight_vlm"
     assert lightweight["lightweightVlmContributionAccepted"] is True
-    assert constructed["detection_labels"] == ["person"]
+    assert constructed["detection_labels"] == ["person", "head"]
     assert (
         result[0]["search_metadata"]["lightweightVlmExplanation"]["lightweightVlmImageRegion"]["source"]
         == "detector_crop"
@@ -1425,6 +1425,7 @@ def test_pipeline_marks_vlm_disagreement_without_overriding_weak_rule(monkeypatc
     monkeypatch.setattr(pipeline_module.SETTINGS, "data_dir", tmp_path)
     monkeypatch.setattr(pipeline_module, "imread_rgb", lambda path: np.zeros((100, 100, 3), dtype=np.uint8))
     monkeypatch.setattr(pipeline_module, "imwrite_rgb", lambda path, image: None)  # noqa: ARG005
+    monkeypatch.setattr(pipeline_module, "evaluate_rules", lambda _detections: [weak_rule])
 
     pipeline = pipeline_module.SafeTracePipeline(
         embedder=object(),
@@ -1435,7 +1436,10 @@ def test_pipeline_marks_vlm_disagreement_without_overriding_weak_rule(monkeypatc
     )
     analysis = pipeline.analyze_frame(
         frame,
-        precomputed={"detections": [make_detection("person")], "violations": [weak_rule]},
+        precomputed={
+            "detections": [make_detection("person"), make_detection("torso")],
+            "violations": [weak_rule],
+        },
     )
 
     assert analysis.violations[0].name == "seatbelt_missing"
@@ -1486,6 +1490,7 @@ def test_pipeline_marks_vlm_uncertainty_as_inconclusive(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline_module.SETTINGS, "data_dir", tmp_path)
     monkeypatch.setattr(pipeline_module, "imread_rgb", lambda path: np.zeros((100, 100, 3), dtype=np.uint8))
     monkeypatch.setattr(pipeline_module, "imwrite_rgb", lambda path, image: None)  # noqa: ARG005
+    monkeypatch.setattr(pipeline_module, "evaluate_rules", lambda _detections: [weak_rule])
 
     pipeline = pipeline_module.SafeTracePipeline(
         embedder=object(),
@@ -1496,7 +1501,10 @@ def test_pipeline_marks_vlm_uncertainty_as_inconclusive(monkeypatch, tmp_path):
     )
     analysis = pipeline.analyze_frame(
         frame,
-        precomputed={"detections": [make_detection("person")], "violations": [weak_rule]},
+        precomputed={
+            "detections": [make_detection("person"), make_detection("torso")],
+            "violations": [weak_rule],
+        },
     )
 
     assert analysis.violations[0].evidence["verifierAgreement"] == "inconclusive"
@@ -1513,7 +1521,7 @@ def test_pipeline_lightweight_vlm_budget_records_skip_reason(monkeypatch, tmp_pa
         checkpoint = "checkpoints/yolov8s-seg.pt"
 
         def detect(self, image):  # noqa: ARG002
-            return [make_detection("person")]
+            return [make_detection("person"), make_detection("head")]
 
     class FakeVlmWorker:
         provider = "vlm_lightweight_worker"
@@ -1646,7 +1654,7 @@ def test_pipeline_lightweight_timeout_disables_remaining_job_attempts(monkeypatc
         vlm=fake_vlm,
     )
     precomputed = {
-        "detections": [make_detection("person")],
+        "detections": [make_detection("person"), make_detection("torso")],
         "violations": [
             Violation(
                 name="seatbelt_missing",
@@ -1674,7 +1682,7 @@ def test_pipeline_lightweight_timeout_disables_remaining_job_attempts(monkeypatc
     assert pipeline.component_diagnostics["vlmSkippedReasons"]["local_visual_review_timeout"] == 1
 
 
-def test_pipeline_lightweight_quality_failure_disables_remaining_job_attempts(monkeypatch, tmp_path):
+def test_pipeline_lightweight_quality_failure_records_reason_but_keeps_selected_frames_eligible(monkeypatch, tmp_path):
     import src.pipeline as pipeline_module
 
     class FakeVlmWorker:
@@ -1724,7 +1732,7 @@ def test_pipeline_lightweight_quality_failure_disables_remaining_job_attempts(mo
         vlm=fake_vlm,
     )
     precomputed = {
-        "detections": [make_detection("person")],
+        "detections": [make_detection("person"), make_detection("torso")],
         "violations": [
             Violation(
                 name="seatbelt_missing",
@@ -1743,11 +1751,13 @@ def test_pipeline_lightweight_quality_failure_disables_remaining_job_attempts(mo
     pipeline.analyze_frame(tmp_path / "first.jpg", precomputed=precomputed)
     pipeline.analyze_frame(tmp_path / "second.jpg", precomputed=precomputed)
 
-    assert fake_vlm.count == 1
-    assert pipeline.component_diagnostics["totalVlmAttempts"] == 1
-    assert pipeline.component_diagnostics["totalVlmRejected"] == 1
-    assert pipeline.component_diagnostics["lightweightVlmDisabledReason"] == "local_visual_review_quality_guard"
-    assert pipeline.component_diagnostics["vlmSkippedReasons"]["local_visual_review_quality_guard"] == 1
+    assert fake_vlm.count == 2
+    assert pipeline.component_diagnostics["totalVlmAttempts"] == 2
+    assert pipeline.component_diagnostics["totalVlmRejected"] == 2
+    assert pipeline.component_diagnostics["lightweightVlmDisabledReason"] is None
+    assert pipeline.component_diagnostics["lightweightVlmRuntimeGuardReason"] == "local_visual_review_quality_guard"
+    assert pipeline.component_diagnostics["lightweightVlmQualityGuardReached"] is True
+    assert "local_visual_review_quality_guard" not in pipeline.component_diagnostics["vlmSkippedReasons"]
 
 
 def test_pipeline_lightweight_job_time_budget_stops_remaining_attempts(monkeypatch, tmp_path):
@@ -1798,7 +1808,10 @@ def test_pipeline_lightweight_job_time_budget_stops_remaining_attempts(monkeypat
         segmenter=pipeline_module.CoarseMaskSegmenter(),
         vlm=fake_vlm,
     )
-    precomputed = {"detections": [make_detection("person")], "violations": [make_violation()]}
+    precomputed = {
+        "detections": [make_detection("person"), make_detection("head")],
+        "violations": [make_violation()],
+    }
 
     first = pipeline.analyze_frame(tmp_path / "first.jpg", precomputed=precomputed)
     first_diag = dict(pipeline._last_lightweight_vlm_frame_diagnostics)
@@ -1900,7 +1913,7 @@ def test_pipeline_safe_mode_direct_run_completes_without_embeddings(monkeypatch,
         checkpoint = "checkpoints/yolov8s-seg.pt"
 
         def detect(self, image):  # noqa: ARG002
-            return []
+            return [make_detection("person"), make_detection("head")]
 
     def fail_if_called(component):
         def inner(*args, **kwargs):  # noqa: ARG001
@@ -1919,7 +1932,7 @@ def test_pipeline_safe_mode_direct_run_completes_without_embeddings(monkeypatch,
     monkeypatch.setattr(pipeline_module, "MobileSamSegmenter", fail_if_called("MobileSamSegmenter"))
     monkeypatch.setattr(pipeline_module, "VlmReasoner", fail_if_called("VlmReasoner"))
     monkeypatch.setattr(pipeline_module, "YoloDetector", FakeDetector)
-    monkeypatch.setattr(pipeline_module, "imread_rgb", lambda path: np.zeros((4, 4, 3), dtype=np.uint8))
+    monkeypatch.setattr(pipeline_module, "imread_rgb", lambda path: np.zeros((100, 100, 3), dtype=np.uint8))
     monkeypatch.setattr(pipeline_module, "evaluate_rules", lambda detections: [make_violation()])
 
     pipeline = pipeline_module.SafeTracePipeline()
@@ -2365,7 +2378,7 @@ def test_pipeline_caps_local_vlm_explanation_attempts(monkeypatch, tmp_path):
 
     class FakeDetector:
         def detect(self, image):  # noqa: ARG002
-            return []
+            return [make_detection("person"), make_detection("head")]
 
     class FakeSegmenter:
         def refine(self, image, detections):  # noqa: ARG002
@@ -2387,7 +2400,7 @@ def test_pipeline_caps_local_vlm_explanation_attempts(monkeypatch, tmp_path):
     fake_vlm = FakeVlm()
     monkeypatch.setattr(pipeline_module.SETTINGS, "vlm_max_frames", 1)
     monkeypatch.setattr(pipeline_module.SETTINGS, "vlm_profile", "lightweight_256m")
-    monkeypatch.setattr(pipeline_module, "imread_rgb", lambda path: np.zeros((4, 4, 3), dtype=np.uint8))
+    monkeypatch.setattr(pipeline_module, "imread_rgb", lambda path: np.zeros((100, 100, 3), dtype=np.uint8))
     monkeypatch.setattr(pipeline_module, "evaluate_rules", lambda detections: [make_violation()])
 
     pipeline = pipeline_module.SafeTracePipeline(
@@ -2414,7 +2427,7 @@ def test_pipeline_default_local_vlm_frame_limit_attempts_selected_frames(monkeyp
 
     class FakeDetector:
         def detect(self, image):  # noqa: ARG002
-            return []
+            return [make_detection("person"), make_detection("head")]
 
     class FakeSegmenter:
         def refine(self, image, detections):  # noqa: ARG002
@@ -2438,7 +2451,7 @@ def test_pipeline_default_local_vlm_frame_limit_attempts_selected_frames(monkeyp
     monkeypatch.setattr(pipeline_module.SETTINGS, "vlm_max_evidence_frames", 5)
     monkeypatch.setattr(pipeline_module.SETTINGS, "vlm_job_timeout_seconds", 0)
     monkeypatch.setattr(pipeline_module.SETTINGS, "vlm_profile", "lightweight_512m")
-    monkeypatch.setattr(pipeline_module, "imread_rgb", lambda path: np.zeros((4, 4, 3), dtype=np.uint8))
+    monkeypatch.setattr(pipeline_module, "imread_rgb", lambda path: np.zeros((100, 100, 3), dtype=np.uint8))
     monkeypatch.setattr(pipeline_module, "evaluate_rules", lambda detections: [make_violation()])
 
     pipeline = pipeline_module.SafeTracePipeline(
@@ -2518,7 +2531,7 @@ def test_pipeline_enhanced_mode_attempts_frames_without_shared_lightweight_budge
         query_context="driver missing seatbelt",
     )
     precomputed = {
-        "detections": [make_detection("person")],
+        "detections": [make_detection("person"), make_detection("torso")],
         "violations": [
             Violation(
                 name="seatbelt_missing",
@@ -2625,6 +2638,18 @@ def test_generic_object_inventory_output_falls_back_to_rule_based(monkeypatch):
     assert reasoner.last_quality_issue == "generic object inventory"
     assert reasoner.last_fallback_reason == "quality:generic object inventory"
     assert "Rule-based explanation" in text
+
+
+def test_useful_vlm_uncertainty_is_accepted_for_seatbelt_review():
+    text = (
+        "visible_evidence: belt path not visible across the torso "
+        "visual_status: unclear due to occlusion "
+        "short_reason: cannot confirm a visible seatbelt from this frame "
+        "confidence_hint: low"
+    )
+
+    assert vlm_reasoner.vlm_output_quality_issue(text) is None
+    assert is_useful_vlm_output(text) is True
 
 
 def test_lightweight_vlm_evaluation_harness_covers_safety_scenarios():

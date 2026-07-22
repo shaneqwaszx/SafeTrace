@@ -1,6 +1,6 @@
 import clsx from 'clsx';
 import { useRef, useState, type DragEvent } from 'react';
-import { UploadCloud } from 'lucide-react';
+import { FolderOpen, UploadCloud } from 'lucide-react';
 import type { MediaItem } from '../types/analysis';
 
 type UploadPanelProps = {
@@ -12,6 +12,7 @@ type UploadPanelProps = {
 
 export function UploadPanel({ media, onFileSelected, onFilesSelected, disabled = false }: UploadPanelProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const directoryInputRef = useRef<HTMLInputElement | null>(null);
   const [isDragging, setIsDragging] = useState(false);
 
   function handleFiles(files: FileList | null) {
@@ -70,19 +71,42 @@ export function UploadPanel({ media, onFileSelected, onFilesSelected, disabled =
           <p className="mt-1 text-xs leading-5 text-slate-500">
             {disabled ? 'Connect to the SafeTrace backend before selecting media.' : 'Drop videos, a ZIP archive, or browse from this device.'}
           </p>
-          <button
-            className="focus-ring mt-3 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
-            type="button"
-            disabled={disabled}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            Browse files
-          </button>
+          <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+            <button
+              className="focus-ring rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+              type="button"
+              disabled={disabled}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              Browse files
+            </button>
+            <button
+              className="focus-ring inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+              type="button"
+              disabled={disabled}
+              onClick={() => directoryInputRef.current?.click()}
+            >
+              <FolderOpen className="h-3.5 w-3.5" aria-hidden="true" />
+              Browse folder
+            </button>
+          </div>
           <input
             ref={fileInputRef}
             className="sr-only"
             type="file"
             accept="image/*,video/*,.zip,application/zip"
+            multiple
+            disabled={disabled}
+            onChange={(event) => handleFiles(event.target.files)}
+          />
+          <input
+            ref={(node) => {
+              directoryInputRef.current = node;
+              if (node) node.setAttribute('webkitdirectory', '');
+            }}
+            className="sr-only"
+            type="file"
+            accept="video/*"
             multiple
             disabled={disabled}
             onChange={(event) => handleFiles(event.target.files)}

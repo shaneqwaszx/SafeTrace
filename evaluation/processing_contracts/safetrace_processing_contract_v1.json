@@ -1,0 +1,52 @@
+{
+  "contractVersion": "1.0.0",
+  "policy": "Ranges are reviewed controls; changing them requires a documented baseline reason.",
+  "controls": [
+    {
+      "controlId": "interior_positive",
+      "profile": "seatbelt_compliance",
+      "invariants": {"query": "driver or occupant without seatbelt"},
+      "behavior": {
+        "profileApplicable": true,
+        "requiredFindings": ["seatbelt_missing"],
+        "reviewOnlyFinding": "seatbelt_missing",
+        "minCandidateCount": 1,
+        "minEvidenceCount": 1
+      }
+    },
+    {
+      "controlId": "interior_positive",
+      "profile": "general_safety",
+      "invariants": {"query": "driver or occupant without seatbelt"},
+      "behavior": {
+        "profileApplicable": true,
+        "requiredFindings": ["seatbelt_missing"],
+        "reviewOnlyFinding": "seatbelt_missing",
+        "minCandidateCount": 1,
+        "minEvidenceCount": 1
+      }
+    },
+    {
+      "controlId": "exterior_negative",
+      "profile": "seatbelt_compliance",
+      "invariants": {"query": "driver or occupant without seatbelt"},
+      "behavior": {
+        "profileApplicable": false,
+        "absentFindings": ["seatbelt_missing", "helmet_missing", "phone_use", "hands_off_steering_wheel"],
+        "maxCandidateCount": 0,
+        "maxEvidenceCount": 0
+      }
+    },
+    {
+      "controlId": "exterior_negative",
+      "profile": "general_safety",
+      "invariants": {"query": "driver or occupant without seatbelt"},
+      "behavior": {
+        "profileApplicable": false,
+        "absentFindings": ["seatbelt_missing", "helmet_missing", "phone_use", "hands_off_steering_wheel"],
+        "maxCandidateCount": 0,
+        "maxEvidenceCount": 0
+      }
+    }
+  ]
+}

@@ -61,6 +61,22 @@ def timestamp_from_frame_id(frame_id: str) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def format_timestamp_seconds(value: Any) -> str:
+    try:
+        seconds = max(0.0, float(value))
+    except (TypeError, ValueError):
+        return "00:00:00"
+    whole_seconds = int(seconds)
+    hours, remainder = divmod(whole_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    milliseconds = int(round((seconds - whole_seconds) * 1000))
+    if milliseconds >= 1000:
+        secs += 1
+        milliseconds = 0
+    base = f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{base}.{milliseconds:03d}" if milliseconds else base
+
+
 def safe_output_filename(frame_id: str, annotated_path: Path) -> str:
     safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", frame_id or annotated_path.stem).strip("._")
     suffix = annotated_path.suffix.lower() if annotated_path.suffix.lower() in IMAGE_SUFFIXES else ".jpg"
@@ -103,14 +119,43 @@ def normalize_pipeline_results(
     raw_frames: Iterable[Dict[str, Any]],
     media_dir: Path,
     register_media: Callable[[str, Path], None],
+    source_relative_path: str | None = None,
 ) -> Dict[str, Any]:
-    raw_frame_list = list(raw_frames)
+    def canonical_key(raw: Dict[str, Any]) -> tuple[str, float, int, str]:
+        timestamp_value = raw.get("timestamp_seconds")
+        try:
+            timestamp_number = float(timestamp_value) if timestamp_value is not None else 0.0
+        except (TypeError, ValueError):
+            timestamp_number = 0.0
+        source_index = raw.get("source_frame_index")
+        try:
+            source_index_number = int(source_index) if source_index is not None else 2**31 - 1
+        except (TypeError, ValueError):
+            source_index_number = 2**31 - 1
+        return (
+            str(raw.get("source_relative_path") or source_relative_path or media_name).replace("\\", "/").lower(),
+            timestamp_number,
+            source_index_number,
+            str(raw.get("evidence_id") or raw.get("frame_id") or ""),
+        )
+
+    raw_frame_list = sorted(list(raw_frames), key=canonical_key)
     frames: List[Dict[str, Any]] = []
+    diagnostic_frames: List[Dict[str, Any]] = []
     grouped: Dict[str, Dict[str, Any]] = {}
+    frame_id_counts: Dict[str, int] = {}
 
     for index, raw in enumerate(raw_frame_list, start=1):
-        frame_id = str(raw.get("frame_id") or f"frame_{index:03d}")
-        timestamp = timestamp_from_frame_id(frame_id)
+        base_frame_id = str(raw.get("frame_id") or f"frame_{index:03d}")
+        occurrence = frame_id_counts.get(base_frame_id, 0) + 1
+        frame_id_counts[base_frame_id] = occurrence
+        frame_id = base_frame_id if occurrence == 1 else f"{base_frame_id}__{occurrence:02d}"
+        timestamp_seconds = raw.get("timestamp_seconds")
+        timestamp = (
+            format_timestamp_seconds(timestamp_seconds)
+            if timestamp_seconds is not None
+            else timestamp_from_frame_id(frame_id)
+        )
         raw_violations = list(raw.get("violations") or [])
 
         frame_violations: List[Dict[str, Any]] = []
@@ -147,6 +192,12 @@ def normalize_pipeline_results(
                     "verifierDisagreementReason": evidence.get("verifierDisagreementReason"),
                     "verifierConfidenceHint": evidence.get("verifierConfidenceHint"),
                     "finalReviewerNote": evidence.get("finalReviewerNote"),
+                    "originProfileId": evidence.get("originProfileId"),
+                    "originProfileLabel": evidence.get("originProfileLabel"),
+                    "originRule": evidence.get("originRule"),
+                    "profileApplicability": evidence.get("profileApplicability"),
+                    "reviewLevel": evidence.get("reviewLevel") or evidence_strength,
+                    "deduplicationKey": evidence.get("deduplicationKey"),
                 }
             )
 
@@ -166,6 +217,12 @@ def normalize_pipeline_results(
                     "verifierAgreement": evidence.get("verifierAgreement"),
                     "verifierDisagreementReason": evidence.get("verifierDisagreementReason"),
                     "finalReviewerNote": evidence.get("finalReviewerNote"),
+                    "originProfileId": evidence.get("originProfileId"),
+                    "originProfileLabel": evidence.get("originProfileLabel"),
+                    "originRule": evidence.get("originRule"),
+                    "profileApplicability": evidence.get("profileApplicability"),
+                    "reviewLevel": evidence.get("reviewLevel") or evidence_strength,
+                    "deduplicationKey": evidence.get("deduplicationKey"),
                 },
             )
             if SEVERITY_RANK.get(severity, 0) > SEVERITY_RANK.get(group["severity"], 0):
@@ -179,6 +236,12 @@ def normalize_pipeline_results(
                     "evidenceStrength": evidence_strength,
                     "confidenceReason": confidence_reason,
                     "verifierAgreement": evidence.get("verifierAgreement"),
+                    "originProfileId": evidence.get("originProfileId"),
+                    "originProfileLabel": evidence.get("originProfileLabel"),
+                    "originRule": evidence.get("originRule"),
+                    "profileApplicability": evidence.get("profileApplicability"),
+                    "reviewLevel": evidence.get("reviewLevel") or evidence_strength,
+                    "deduplicationKey": evidence.get("deduplicationKey"),
                 }
             )
             group["confidences"].append(confidence)
@@ -193,36 +256,45 @@ def normalize_pipeline_results(
             if evidence.get("finalReviewerNote"):
                 group["finalReviewerNote"] = evidence.get("finalReviewerNote")
 
-        image_url, image_message = copy_annotated_image(
-            job_id=job_id,
-            frame_id=frame_id,
-            annotated_path=raw.get("annotated_path"),
-            media_dir=media_dir,
-            register_media=register_media,
-        )
-
-        frames.append(
-            {
+        frame_payload = {
                 "id": frame_id,
-                "frameNumber": index,
+                "frameNumber": len(frames) + 1 if frame_violations else None,
                 "timestamp": timestamp,
+                "timestampSeconds": float(timestamp_seconds) if timestamp_seconds is not None else None,
+                "sourceFrameIndex": raw.get("source_frame_index"),
+                "sourceRelativePath": str(raw.get("source_relative_path") or source_relative_path or media_name),
                 "queryRelevance": float(raw.get("score") or 0.0),
                 "status": "violations_detected" if frame_violations else "no_violations",
-                "imageUrl": image_url,
-                "imageMessage": image_message,
+                "imageUrl": None,
+                "imageMessage": None,
                 "explanationSource": raw.get("explanation_source") or raw.get("explanationSource"),
                 "violations": frame_violations,
                 "technicalEvidence": {
+                    "sourceFrameId": base_frame_id,
                     "sourceFramePath": raw.get("frame_path"),
                     "annotatedPath": raw.get("annotated_path"),
                     "detections": raw.get("detections") or [],
                     "explanation": raw.get("explanation"),
                     "explanationSource": raw.get("explanation_source") or raw.get("explanationSource"),
                     "searchMetadata": raw.get("search_metadata") or {},
+                    "sceneApplicability": raw.get("scene_applicability") or {},
+                    "suppressedFindings": raw.get("suppressed_findings") or [],
                     "raw": raw,
                 },
             }
-        )
+        if frame_violations:
+            image_url, image_message = copy_annotated_image(
+                job_id=job_id,
+                frame_id=frame_id,
+                annotated_path=raw.get("annotated_path"),
+                media_dir=media_dir,
+                register_media=register_media,
+            )
+            frame_payload["imageUrl"] = image_url
+            frame_payload["imageMessage"] = image_message
+            frames.append(frame_payload)
+        elif bool(getattr(SETTINGS, "diagnostic_frames_enabled", False)):
+            diagnostic_frames.append(frame_payload)
 
     grouped_violations: List[Dict[str, Any]] = []
     for group in grouped.values():
@@ -254,6 +326,15 @@ def normalize_pipeline_results(
         if grouped_violations
         else "No matching safety violations were detected in the selected frames."
     )
+    evidence_frames = [frame for frame in frames if frame.get("imageUrl")]
+    if not grouped_violations:
+        evidence_status = "not_generated"
+    elif not evidence_frames:
+        evidence_status = "unavailable"
+    elif len(evidence_frames) < len(frames):
+        evidence_status = "partial"
+    else:
+        evidence_status = "available"
     processing_metadata = next(
         (
             dict(raw.get("processing_metadata") or {})
@@ -264,7 +345,7 @@ def normalize_pipeline_results(
     )
     if processing_metadata is None:
         processing_metadata = build_processing_metadata(
-            sampled_frame_count=len(frames),
+            sampled_frame_count=len(raw_frame_list),
             sampling_strategy="api_normalized_frames",
             fps=None,
             max_frames=SETTINGS.max_frames,
@@ -272,7 +353,7 @@ def normalize_pipeline_results(
             embedding_window_size=SETTINGS.embedding_window_size,
             embedding_window_stride=SETTINGS.embedding_window_stride,
             embedding_pooling_strategy=SETTINGS.embedding_pooling_strategy,
-            processing_window_count=len(frames),
+            processing_window_count=len(raw_frame_list),
         )
 
     return {
@@ -287,19 +368,29 @@ def normalize_pipeline_results(
         },
         "query": query,
         "summary": {
-            "framesAnalyzed": len(frames),
+            "framesAnalyzed": len(raw_frame_list),
             "framesWithViolations": frames_with_violations,
             "uniqueViolationTypes": len(grouped_violations),
             "highestSeverity": highest,
-            "summaryText": summary_text,
+            "summaryText": (
+                "No violations found. No evidence frames were generated."
+                if not grouped_violations
+                else summary_text
+            ),
             "potentialEventCount": event_summary["potentialEventCount"],
             "eventTypes": event_summary["eventTypes"],
             "overallConfidence": event_summary["overallConfidence"],
             "keyEvents": event_summary["keyEvents"],
+            "violationsDetected": bool(grouped_violations),
+            "acceptedFindingCount": len(grouped_violations),
+            "evidenceStatus": evidence_status,
         },
         "violations": grouped_violations,
         "events": events,
         "frames": frames,
+        "evidence": evidence_frames,
+        "evidenceStatus": evidence_status,
+        "diagnosticFrames": diagnostic_frames,
         "technicalDetails": {
             "normalizer": "safetrace-api-v1",
             "processingMetadata": processing_metadata,
@@ -307,6 +398,15 @@ def normalize_pipeline_results(
                 "mergeGapSeconds": 5,
                 "eventCount": len(events),
                 "note": "Presentation-level grouping only; detector and rule outputs are unchanged.",
+            },
+            "evidenceSelection": {
+                "canonicalOrder": ["sourceRelativePath", "timestampSeconds", "sourceFrameIndex", "evidenceId"],
+                "screenedFrameCount": len(raw_frame_list),
+                "acceptedFindingFrameCount": len(frames),
+                "acceptedEvidenceCount": len(evidence_frames),
+                "evidenceStatus": evidence_status,
+                "diagnosticFrameCount": len(diagnostic_frames),
+                "diagnosticFramesEnabled": bool(getattr(SETTINGS, "diagnostic_frames_enabled", False)),
             },
         },
     }

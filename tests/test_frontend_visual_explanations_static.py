@@ -186,6 +186,7 @@ def test_frontend_resets_removed_vlm_profiles_from_local_storage():
 
 def test_layered_vlm_selector_and_frame_card_copy_are_visible():
     sidebar_source = read_frontend("components/Sidebar.tsx")
+    setup_source = read_frontend("components/AnalysisSetupPanel.tsx")
     card_source = read_frontend("components/FrameEvidenceCard.tsx")
     details_source = read_frontend("components/TechnicalDetails.tsx")
     smoke_script = (ROOT / "scripts" / "smoke_lightweight_512m_vlm.py").read_text(encoding="utf-8")
@@ -248,10 +249,13 @@ def test_phase_a_use_case_profiles_and_queue_safety_are_visible():
     summary_source = read_frontend("components/AnalysisSummary.tsx")
     media_source = read_frontend("components/SelectedMediaViewer.tsx")
     query_source = read_frontend("components/QueryTabs.tsx")
+    setup_source = read_frontend("components/AnalysisSetupPanel.tsx")
     evidence_source = read_frontend("components/FrameEvidenceCard.tsx")
     violation_summary_source = read_frontend("components/ViolationSummary.tsx")
 
-    assert "Use-case profile" in sidebar_source
+    assert "Use-case profile" in setup_source
+    assert "Profile-specific query" in setup_source
+    assert "Use-case profile" not in sidebar_source
     assert "Seatbelt compliance" in profiles_source
     assert "Phone use / distracted driving" in profiles_source
     assert "Helmet / PPE compliance" in profiles_source
@@ -284,8 +288,8 @@ def test_phase_a_use_case_profiles_and_queue_safety_are_visible():
     assert "isLoading || !canAnalyze" not in query_source
     assert "Use-case profile" in summary_source
     assert "Use-case profile" in media_source
-    assert "supportLevelLabel" in query_source
-    assert "Effective query sent" in query_source
+    assert "supportLevelLabel" in setup_source
+    assert "Profile-specific query" in setup_source
     assert "Resolve the profile/query conflict" in query_source
     assert "Detector classes involved" in evidence_source
     assert "isViolationAlignedWithProfile" in profiles_source
@@ -406,6 +410,9 @@ def test_evidence_cards_use_user_facing_explanation_sections_and_keeps_debug_in_
     assert "Fast Local Analysis explanation" in source
     assert "Local VLM Assist explanation" in source
     assert "Advanced GPU VLM Assist explanation" in source
+    assert "Advanced GPU VLM Assist attempted - Fast Local Analysis fallback" in source
+    assert "Local VLM Assist attempted - Fast Local Analysis fallback" in source
+    assert "Local VLM output was rejected as unrelated object inventory." in source
     assert "SafeTrace used local detector/rule evidence for this frame." in source
     assert "Local visual review did not add a confident result for this frame." in source
     assert "SafeTrace used local visual review to refine the detector/rule evidence." in source
@@ -481,6 +488,24 @@ def test_frontend_surfaces_copyable_job_identifiers():
     assert "job_..." in helper_source
 
 
+def test_queue_cards_show_runtime_mode_device_and_vlm_status():
+    queue_source = read_frontend("components/VideoQueue.tsx")
+    app_source = read_frontend("App.tsx")
+    types_source = read_frontend("types/analysis.ts")
+
+    assert "Runtime:" in queue_source
+    assert "Requested:" in queue_source
+    assert "Actual review:" in queue_source
+    assert "Device:" in queue_source
+    assert "VLM:" in queue_source
+    assert "MobileSAM:" in queue_source
+    assert "queueRuntimePatchFromJob" in app_source
+    assert "engineRuntimeSummary" in types_source
+    assert "requestedModeLabel" in types_source
+    assert "actualReviewLabel" in types_source
+    assert "actualDeviceLabel" in types_source
+
+
 def test_frontend_keeps_batch_ids_out_of_job_status_requests():
     app_source = read_frontend("App.tsx")
     service_source = read_frontend("services/analysisService.ts")
@@ -536,3 +561,170 @@ def test_frontend_source_does_not_display_raw_vlm_artifacts():
     assert "<global-img>" not in source
     assert "<row_" not in source
     assert "body stream already read" not in source
+
+
+def test_phase_n_frontend_supports_folder_batches_hierarchy_and_comprehensive_review():
+    app_source = read_frontend("App.tsx")
+    upload_source = read_frontend("components/UploadPanel.tsx")
+    sidebar_source = read_frontend("components/Sidebar.tsx")
+    service_source = read_frontend("services/analysisService.ts")
+    evidence_source = read_frontend("components/FrameEvidenceCard.tsx")
+
+    assert "webkitdirectory" in upload_source
+    assert "Browse folder" in upload_source
+    assert "relativePaths" in service_source
+    assert "webkitRelativePath" in service_source
+    assert "importKey" in service_source
+    setup_source = read_frontend("components/AnalysisSetupPanel.tsx")
+    assert "Comprehensive Review" in setup_source
+    assert "Comprehensive Review" not in sidebar_source
+    assert "reviewMode" in setup_source
+    assert "Folder hierarchy" in app_source
+    assert "Retry failed only" in app_source
+    assert "Pause queued" in app_source
+    assert "Has findings" in app_source
+    assert "sourceRelativePath" in evidence_source
+    assert "timestampLabel" in evidence_source
+
+
+def test_phase_u_frontend_combines_setup_orders_evidence_and_hides_empty_gallery():
+    app_source = read_frontend("App.tsx")
+    setup_source = read_frontend("components/AnalysisSetupPanel.tsx")
+    sidebar_source = read_frontend("components/Sidebar.tsx")
+    query_source = read_frontend("components/QueryTabs.tsx")
+    evidence_source = read_frontend("components/EvidenceFrames.tsx")
+    card_source = read_frontend("components/FrameEvidenceCard.tsx")
+    progress_source = read_frontend("components/AnalysisProgress.tsx")
+    overview_source = read_frontend("components/OperationalOverview.tsx")
+
+    assert app_source.index("<ResultCachePanel") < app_source.index("<AnalysisSetupPanel")
+    assert app_source.index("<AnalysisSetupPanel") < app_source.index("<SelectedMediaViewer")
+    assert "Review coverage" in setup_source
+    assert "Use-case profile" in setup_source
+    assert "Profile-specific query" in setup_source
+    assert "Reset query to profile default" in setup_source
+    assert "Review coverage" not in sidebar_source
+    assert "Use-case profile" not in sidebar_source
+    assert "Profile query refinement" not in query_source
+
+    assert "sourceFrameIndex" in evidence_source
+    assert "presentationNumbers" in evidence_source
+    assert "Frame {presentationNumber} of {totalEvidence}" in card_source
+    assert "Source frame:" in card_source
+    assert "No violations found." in evidence_source
+    assert "No evidence frames were generated." in evidence_source
+    assert "stageElapsedSeconds" in progress_source
+    assert "Analysis workers" in overview_source
+    assert "Worker admission" in overview_source
+
+
+def test_phase_o_internal_validation_dashboard_is_opt_in_and_truthful():
+    app_source = read_frontend("App.tsx")
+    dashboard_source = read_frontend("components/ValidationDashboard.tsx")
+
+    assert "validation=1" not in app_source
+    assert "get('validation') === '1'" in app_source
+    assert "<ValidationDashboard />" in app_source
+    assert "Internal validation" in dashboard_source
+    assert "Detector readiness" in dashboard_source
+    assert "Unlabelled footage can validate runtime, schema, and stability only" in dashboard_source
+    assert "Accuracy gate not passed" in dashboard_source
+    assert "Do not promote" in dashboard_source
+    assert "Load baseline JSON" in dashboard_source
+    assert "Load candidate JSON" in dashboard_source
+
+
+def test_phase_p_frontend_recovery_storage_and_operational_dashboard():
+    app_source = read_frontend("App.tsx")
+    recovery_source = read_frontend("components/RecoveryBanner.tsx")
+    operations_source = read_frontend("components/OperationalOverview.tsx")
+    service_source = read_frontend("services/analysisService.ts")
+
+    assert "getRecoverySummary" in app_source
+    assert "getStorageSummary" in app_source
+    assert "getDashboardSummary" in app_source
+    assert "Continue" in recovery_source
+    assert "Restart fresh" in recovery_source
+    assert ">Discard</button>" in recovery_source
+    assert "Later" in recovery_source
+    assert "Operational overview" in operations_source
+    assert "Jobs by status" in operations_source
+    assert "Storage management" in operations_source
+    assert "Accuracy" not in operations_source or "No accuracy claim" in operations_source
+    assert "Cleanup preview" in operations_source
+    assert "Apply confirmed cleanup" in operations_source
+    assert "recovery/resume" in service_source
+    assert "recovery/restart-fresh" in service_source
+    assert "storage/cleanup/preview" in service_source
+    assert "dashboard/summary" in service_source
+
+
+def test_phase_t_restart_fresh_prompt_is_selected_confirmed_and_cache_safe():
+    app_source = read_frontend("App.tsx")
+    recovery_source = read_frontend("components/RecoveryBanner.tsx")
+    service_source = read_frontend("services/analysisService.ts")
+
+    for action in ("Continue", "Restart fresh", "Discard", "Later"):
+        assert action in recovery_source
+    assert "Select all unfinished" in recovery_source
+    assert "Also purge compatible reusable cache for these source files" in recovery_source
+    assert "useState(false)" in recovery_source
+    assert 'type="checkbox"' in recovery_source
+    assert "restartRecoveryFresh" in app_source
+    assert "The original uploads will be preserved" in app_source
+    assert "Also purge only reusable cache entries compatible with the selected source files" in app_source
+    assert "recovery/restart-fresh" in service_source
+    assert "confirmRestartFresh: true" in service_source
+    assert "confirmPurgeCompatibleCache: purgeCompatibleCache" in service_source
+
+
+def test_phase_q_operations_workspace_and_result_lifecycle_are_backend_canonical():
+    app_source = read_frontend("App.tsx")
+    workspace_source = read_frontend("components/OperationsWorkspace.tsx")
+    lifecycle_source = read_frontend("components/ResultLifecycleActions.tsx")
+    service_source = read_frontend("services/analysisService.ts")
+
+    for section in ("Overview", "Batches", "Jobs", "Evidence", "Recovery", "Storage", "Exports", "System"):
+        assert f"'{section}'" in workspace_source
+    assert 'aria-label="Operations sections"' in workspace_source
+    assert "Loading backend operational state" in workspace_source
+    assert "Operational data could not be loaded" in workspace_source
+    assert ">Retry</button>" in workspace_source
+    assert "No backend jobs" in workspace_source
+    assert "No backend batches" in workspace_source
+    assert "No verified exports" in workspace_source
+    assert "getJobsPage" in workspace_source
+    assert "getBatchesPage" in workspace_source
+    assert "getExportsPage" in workspace_source
+    assert "getCleanupHistory" in workspace_source
+    assert "Search jobs" in workspace_source
+    assert "Filter jobs by status" in workspace_source
+    assert "selectedJobs" in workspace_source
+    assert "PageControls" in workspace_source
+    assert "item.hierarchy" in workspace_source
+    assert "jobs?page=" in service_source
+    assert "batches?page=" in service_source
+    assert "exports?page=" in service_source
+    assert "storage/cleanup/history?page=" in service_source
+    assert "<OperationsWorkspace" in app_source
+
+    assert "Pin result" in lifecycle_source
+    assert "Unpin result" in lifecycle_source
+    assert "Export result" in lifecycle_source
+    assert "Export, verify, then delete" in lifecycle_source
+    assert "if (pending) return" in lifecycle_source
+    assert "disabled={Boolean(pending)}" in lifecycle_source
+    assert "window.confirm" in lifecycle_source
+    assert "<ResultLifecycleActions" in app_source
+
+
+def test_phase_q_evidence_remains_lazy_filterable_and_truthful():
+    visual_source = read_frontend("components/EvidenceFrameVisual.tsx")
+    evidence_source = read_frontend("components/EvidenceFrames.tsx")
+    workspace_source = read_frontend("components/OperationsWorkspace.tsx")
+
+    assert 'loading="lazy"' in visual_source
+    assert "findingFilter" in evidence_source
+    assert "sort" in evidence_source
+    assert "Export filtered metadata" in evidence_source
+    assert "Accuracy" not in workspace_source

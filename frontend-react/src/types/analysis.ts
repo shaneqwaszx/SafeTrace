@@ -8,6 +8,75 @@ export type DeviceMode = 'Auto' | 'CPU' | 'GPU';
 
 export type BackendConnectionState = 'live' | 'connecting' | 'connected' | 'disconnected' | 'incompatible' | 'error';
 
+export type RecoveryJob = {
+  jobId: string;
+  batchId?: string | null;
+  sourceRelativePath: string;
+  sourceGroupPath: string;
+  status: string;
+  lastStage: string;
+  progressPercent: number;
+  resumable: boolean;
+  resumableReason: string;
+  retryCount: number;
+  storedBytes: number;
+  lastUpdate: string;
+};
+
+export type RecoverySummary = {
+  policy: 'prompt' | 'auto_resume' | 'discard' | string;
+  candidateCount: number;
+  storedBytes: number;
+  jobs: RecoveryJob[];
+  batches: Array<{ batchId?: string | null; sourceFilename: string; candidateCount: number; storedBytes: number; jobs: RecoveryJob[] }>;
+};
+
+export type StorageSummary = {
+  capturedAt: string;
+  runtimeRoot: string;
+  categories: Record<string, number>;
+  totalManagedBytes: number;
+  freeBytes: number;
+  totalDiskBytes: number;
+  minimumFreeBytes: number;
+  storagePressure: boolean;
+  retention: Record<string, number | string>;
+  protected: Record<string, number>;
+};
+
+export type DashboardSummary = {
+  capturedAt: string;
+  cards: Record<string, number | null>;
+  jobsByStatus: Record<string, number>;
+  violationsByType: Record<string, number>;
+  videosBySourceGroup: Record<string, number>;
+  runtimeByMode: Record<string, number>;
+  failuresByReason: Record<string, number>;
+  storageByCategory: Record<string, number>;
+  accuracyMetricsAvailable: boolean;
+  accuracyNotice: string;
+};
+
+export type ExportSummary = {
+  exportId: string;
+  jobId?: string;
+  batchId?: string | null;
+  status: string;
+  createdAt?: string;
+  sizeBytes: number;
+  fileCount: number;
+  verified: boolean;
+  path: string;
+  manifestPath: string;
+};
+
+export type PaginatedResponse<T> = {
+  page: number;
+  pageSize: number;
+  total: number;
+  items: T[];
+};
+
 export type VlmExplanationProfileId =
   | 'rule_based'
   | 'lightweight_256m'
@@ -53,6 +122,7 @@ export type AnalysisSettings = {
   vlmExplanations?: boolean;
   deviceMode: DeviceMode;
   useCaseProfile: UseCaseProfileSelection;
+  reviewMode: 'fast_local' | 'comprehensive';
 };
 
 export type Violation = {
@@ -73,6 +143,20 @@ export type Violation = {
   verifierDisagreementReason?: string | null;
   verifierConfidenceHint?: string | null;
   finalReviewerNote?: string | null;
+  originProfileId?: string | null;
+  originProfileLabel?: string | null;
+  originRule?: string | null;
+  profileApplicability?: { applicable?: boolean; reason?: string; evaluatedAsProfileId?: string } | null;
+  reviewLevel?: string | null;
+  deduplicationKey?: string | null;
+  findingId?: string;
+  evidenceId?: string;
+  jobId?: string;
+  batchId?: string | null;
+  sourceChecksum?: string | null;
+  originalFilename?: string;
+  sourceRelativePath?: string;
+  sourceGroupPath?: string;
 };
 
 export type Detection = {
@@ -103,6 +187,22 @@ export type FrameResult = {
   violations: Violation[];
   detections: Detection[];
   technicalEvidence: Record<string, unknown>;
+  sourceMetadata?: Record<string, unknown>;
+  videoFilename?: string;
+  sourceRelativePath?: string;
+  sourceGroup?: string;
+  batchId?: string | null;
+  jobId?: string | null;
+  findingId?: string | null;
+  findingIds?: string[];
+  evidenceId?: string;
+  mediaArtifactId?: string | null;
+  sourceChecksum?: string | null;
+  originalFilename?: string;
+  sourceGroupPath?: string;
+  timestampSeconds?: number;
+  timestampLabel?: string;
+  sourceFrameIndex?: number | null;
 };
 
 export type Annotation = {
@@ -133,6 +233,13 @@ export type MediaItem = {
   requestedQuery?: string;
   effectiveQuery?: string;
   errorMessage?: string;
+  jobRuntimeLabel?: string | null;
+  requestedModeLabel?: string | null;
+  actualReviewLabel?: string | null;
+  actualDeviceLabel?: string | null;
+  vlmStatusLabel?: string | null;
+  mobileSamStatusLabel?: string | null;
+  elapsedSeconds?: number | null;
 };
 
 export type BackendHealth = {
@@ -320,6 +427,7 @@ export type AnalysisRequest = {
   vlmEnabled?: boolean;
   device: DeviceMode;
   useCaseProfile?: UseCaseProfileSelection;
+  reviewMode?: 'fast_local' | 'comprehensive';
 };
 
 export type BatchAnalysisRequest = {
@@ -332,11 +440,36 @@ export type BatchAnalysisRequest = {
   vlmEnabled?: boolean;
   device: DeviceMode;
   useCaseProfile?: UseCaseProfileSelection;
+  reviewMode?: 'fast_local' | 'comprehensive';
+  importKey?: string;
 };
 
 export type AnalysisJob = {
   jobId: string;
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'queued' | 'waiting_for_capacity' | 'waiting_for_job_slot' | 'waiting_for_gpu' | 'waiting_for_mobilesam' | 'waiting_for_vlm' | 'running_preprocess' | 'running_detector' | 'running_refinement' | 'running_report' | 'running' | 'retry_wait' | 'recovering' | 'paused' | 'completed' | 'failed' | 'cancelled';
+};
+
+export type AnalysisSetupSummary = {
+  readOnly?: boolean;
+  requestedCoverage?: { id?: string; label?: string };
+  actualCoverage?: { id?: string; label?: string };
+  profile?: { id?: string; label?: string };
+  query?: string;
+  childSettingsDiffer?: boolean;
+  batchChildCount?: number;
+  frameSampling?: {
+    strategy?: string | null;
+    requestedFps?: number | null;
+    samplingFps?: number | null;
+    samplingIntervalSeconds?: number | null;
+    sampledFrameCount?: number | null;
+    sourceVideoFrameCount?: number | null;
+    processingWindowCount?: number | null;
+    maximumSampledFrames?: number | null;
+    requestedEvidenceFrames?: number | null;
+    aggregateSampledFrameCount?: number | null;
+    aggregateSourceVideoFrameCount?: number | null;
+  };
 };
 
 export type JobStatus = AnalysisJob & {
@@ -348,6 +481,16 @@ export type JobStatus = AnalysisJob & {
   error?: string | null;
   metrics?: Record<string, unknown>;
   componentDiagnostics?: Record<string, unknown> | null;
+  scheduler?: {
+    enqueueSequence?: number | null;
+    batchEnqueueSequence?: number | null;
+    childSequence?: number | null;
+    queuePosition?: number | null;
+    workerSlot?: number | null;
+    capacityReason?: string | null;
+    schedulerPolicy?: string | null;
+  } | null;
+  sourceMetadata?: Record<string, unknown>;
   createdAt?: string | null;
   queuedAt?: string | null;
   updatedAt?: string | null;
@@ -359,9 +502,43 @@ export type JobStatus = AnalysisJob & {
   elapsedSeconds?: number | null;
   queueWaitSeconds?: number | null;
   analysisRuntimeSeconds?: number | null;
+  stageStartedAt?: string | null;
+  stageElapsedSeconds?: number | null;
   heartbeatAt?: string | null;
   persistenceWarning?: string | null;
   manifestPersistenceWarning?: string | null;
+  requestedModeLabel?: string | null;
+  requestedVisualExplanationMode?: string | null;
+  actualExplanationMode?: string | null;
+  finalExplanationSource?: string | null;
+  explanationOutcome?: string | null;
+  explanationOutcomeLabel?: string | null;
+  vlmAttempted?: boolean | null;
+  lightweightVlmAttempted?: boolean | null;
+  enhancedVlmAttempted?: boolean | null;
+  vlmAccepted?: boolean | null;
+  lightweightVlmAccepted?: boolean | null;
+  enhancedVlmAccepted?: boolean | null;
+  vlmFallbackReason?: string | null;
+  vlmFallbackReasonLabel?: string | null;
+  actualDeviceLabel?: string | null;
+  jobRuntimeLabel?: string | null;
+  engineRuntimeSummary?: {
+    requestedMode?: string | null;
+    actualReview?: string | null;
+    device?: string | null;
+    vlm?: string | null;
+    mobileSam?: string | null;
+    runtime?: string | null;
+    requestedDevice?: string | null;
+    actualDetectorDevice?: string | null;
+    actualMobileSamDevice?: string | null;
+    actualLightweightVlmDevice?: string | null;
+    actualEnhancedVlmDevice?: string | null;
+    cudaAvailableAtJobStart?: boolean | null;
+    gpuName?: string | null;
+  } | null;
+  analysisSetup?: AnalysisSetupSummary | null;
 };
 
 export type BatchAcceptedFile = {
@@ -372,24 +549,59 @@ export type BatchAcceptedFile = {
   jobId: string;
   status: AnalysisJob['status'];
   error?: string | null;
+  sourceRelativePath?: string | null;
+  sourceDirectory?: string | null;
+  sourceGroupPath?: string | null;
+  sourceGroupLabel?: string | null;
+  checksumSha256?: string | null;
+  importedAt?: string | null;
+  fileIdentity?: string | null;
+  violationCount?: number;
+  enqueueSequence?: number | null;
+  batchEnqueueSequence?: number | null;
+  childSequence?: number | null;
+  queuePosition?: number | null;
+  workerSlot?: number | null;
+  capacityReason?: string | null;
+  requestedModeLabel?: string | null;
+  actualReview?: string | null;
+  deviceLabel?: string | null;
+  mobileSamStatus?: string | null;
 };
 
 export type BatchRejectedFile = {
   filename: string;
   reason: string;
+  sourceRelativePath?: string | null;
+  category?: string | null;
+};
+
+export type BatchHierarchyNode = {
+  name: string;
+  path: string;
+  type: 'batch' | 'group';
+  children: BatchHierarchyNode[];
+  files: BatchAcceptedFile[];
 };
 
 export type BatchStatus = {
   batchId: string;
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'partial' | 'cancelled';
+  status: 'importing' | 'queued' | 'waiting_for_capacity' | 'waiting_for_job_slot' | 'waiting_for_gpu' | 'waiting_for_mobilesam' | 'waiting_for_vlm' | 'running_preprocess' | 'running_detector' | 'running_refinement' | 'running_report' | 'running' | 'retry_wait' | 'paused' | 'recovering' | 'completed' | 'completed_with_failures' | 'failed' | 'partial' | 'cancelled';
   sourceFilename: string;
+  batchDisplayLabel?: string | null;
+  importKey?: string | null;
   acceptedFiles: BatchAcceptedFile[];
   rejectedFiles: BatchRejectedFile[];
   jobIds: string[];
   statusCounts: Record<string, number>;
+  groupSummaries?: Array<Record<string, unknown>>;
+  hierarchy?: BatchHierarchyNode;
+  throughput?: Record<string, unknown>;
+  paused?: boolean;
   createdAt: string;
   updatedAt: string;
   persistenceWarning?: string | null;
+  analysisSetup?: AnalysisSetupSummary | null;
 };
 
 export type ViolationEvent = {
@@ -410,7 +622,22 @@ export type ViolationEvent = {
     timestamp: string;
     confidence: number;
     imageUrl?: string | null;
+    evidenceId?: string;
+    mediaArtifactId?: string | null;
+    jobId?: string;
+    batchId?: string | null;
+    sourceChecksum?: string | null;
+    originalFilename?: string;
+    sourceRelativePath?: string;
+    sourceGroupPath?: string;
   }>;
+  eventId?: string;
+  jobId?: string;
+  batchId?: string | null;
+  sourceChecksum?: string | null;
+  originalFilename?: string;
+  sourceRelativePath?: string;
+  sourceGroupPath?: string;
 };
 
 export type AnalysisResult = {
@@ -424,6 +651,23 @@ export type AnalysisResult = {
   elapsedSeconds?: number | null;
   queueWaitSeconds?: number | null;
   analysisRuntimeSeconds?: number | null;
+  requestedModeLabel?: string | null;
+  requestedVisualExplanationMode?: string | null;
+  actualExplanationMode?: string | null;
+  finalExplanationSource?: string | null;
+  explanationOutcome?: string | null;
+  explanationOutcomeLabel?: string | null;
+  vlmAttempted?: boolean | null;
+  lightweightVlmAttempted?: boolean | null;
+  enhancedVlmAttempted?: boolean | null;
+  vlmAccepted?: boolean | null;
+  lightweightVlmAccepted?: boolean | null;
+  enhancedVlmAccepted?: boolean | null;
+  vlmFallbackReason?: string | null;
+  vlmFallbackReasonLabel?: string | null;
+  actualDeviceLabel?: string | null;
+  jobRuntimeLabel?: string | null;
+  engineRuntimeSummary?: JobStatus['engineRuntimeSummary'];
   id: string;
   query: string;
   media: MediaItem;
@@ -437,6 +681,9 @@ export type AnalysisResult = {
     eventTypes?: string[];
     overallConfidence?: number;
     keyEvents?: unknown[];
+    violationsDetected?: boolean;
+    acceptedFindingCount?: number;
+    evidenceStatus?: string;
   };
   violations?: Array<{
     id: string;
@@ -448,9 +695,25 @@ export type AnalysisResult = {
       frameNumber: number;
       timestamp: string;
       confidence: number;
+      evidenceId?: string;
+      mediaArtifactId?: string | null;
+      findingId?: string;
+      jobId?: string;
+      batchId?: string | null;
+      sourceChecksum?: string | null;
+      originalFilename?: string;
+      sourceRelativePath?: string;
+      sourceGroupPath?: string;
     }>;
     confidenceMin: number;
     confidenceMax: number;
+    findingId?: string;
+    jobId?: string;
+    batchId?: string | null;
+    sourceChecksum?: string | null;
+    originalFilename?: string;
+    sourceRelativePath?: string;
+    sourceGroupPath?: string;
   }>;
   framesAnalyzed: number;
   generatedAt: string;
@@ -458,5 +721,14 @@ export type AnalysisResult = {
   settings?: AnalysisSettings;
   events?: ViolationEvent[];
   frames: FrameResult[];
+  evidenceStatus?: 'available' | 'partial' | 'unavailable' | 'not_generated' | string;
+  analysisSetup?: AnalysisSetupSummary | null;
   technicalDetails?: Record<string, unknown> | null;
+  batchId?: string | null;
+  sourceChecksum?: string | null;
+  originalFilename?: string;
+  sourceRelativePath?: string;
+  sourceGroupPath?: string;
+  executionIdentity?: Record<string, unknown>;
+  resultSchemaVersion?: number;
 };

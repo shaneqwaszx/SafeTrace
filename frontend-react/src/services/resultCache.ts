@@ -1,6 +1,6 @@
 import type { AnalysisResult, BatchStatus, JobStatus } from '../types/analysis';
 
-export const RESULT_CACHE_VERSION = 1;
+export const RESULT_CACHE_VERSION = 2;
 const DB_NAME = 'safetrace-result-cache';
 const STORE_NAME = 'results';
 const LOCAL_STORAGE_VERSION_KEY = 'safetrace.resultCache.version';
@@ -23,6 +23,7 @@ export type CachedResultEntry = {
   jobId?: string;
   batchId?: string;
   selectedJobId?: string;
+  executionIdentityKey?: string;
   result?: AnalysisResult;
   jobStatus?: JobStatus | null;
   batchStatus?: BatchStatus | null;
@@ -39,6 +40,19 @@ export function mediaCacheKey(mediaId: string): string {
 
 export function jobCacheKey(jobId: string): string {
   return `job:${jobId}`;
+}
+
+function executionIdentityKey(result?: AnalysisResult): string | undefined {
+  if (!result?.executionIdentity) return undefined;
+  return JSON.stringify(result.executionIdentity, Object.keys(result.executionIdentity).sort());
+}
+
+export function cacheEntryHasValidOwnership(entry: CachedResultEntry): boolean {
+  if (!entry.result) return true;
+  const expected = entry.selectedJobId || entry.jobId || entry.result.jobId;
+  if (!expected || entry.result.jobId !== expected) return false;
+  if (entry.result.frames.some((frame) => frame.jobId !== expected)) return false;
+  return entry.executionIdentityKey === executionIdentityKey(entry.result);
 }
 
 export function isCacheEntryStale(entry: CachedResultEntry): boolean {
@@ -104,7 +118,9 @@ function prepareEntry(entry: CachedResultEntry): CachedResultEntry | null {
     savedAt: entry.savedAt || now,
     updatedAt: now,
     result: entry.result ? sanitizeResultForCache(entry.result) : undefined,
+    executionIdentityKey: executionIdentityKey(entry.result),
   };
+  if (!cacheEntryHasValidOwnership(prepared)) return null;
   if (jsonByteSize(prepared) <= MAX_CACHE_ENTRY_BYTES) return prepared;
   const compact = compactEntry(prepared);
   if (jsonByteSize(compact) <= MAX_CACHE_ENTRY_BYTES) return compact;
@@ -155,7 +171,9 @@ async function withStore<T>(
 export async function loadCachedResults(): Promise<CachedResultEntry[]> {
   if (!('indexedDB' in window)) return [];
   const entries = await withStore<CachedResultEntry[]>('readonly', (store) => store.getAll());
-  return (entries || []).filter((entry) => entry.cacheVersion === RESULT_CACHE_VERSION);
+  return (entries || []).filter((entry) => (
+    entry.cacheVersion === RESULT_CACHE_VERSION && cacheEntryHasValidOwnership(entry)
+  ));
 }
 
 export async function saveCachedResult(entry: CachedResultEntry): Promise<CacheSaveResult> {
@@ -164,7 +182,7 @@ export async function saveCachedResult(entry: CachedResultEntry): Promise<CacheS
   }
   const prepared = prepareEntry(entry);
   if (!prepared) {
-    return { saved: false, reason: 'Result is too large for the local browser cache.' };
+    return { saved: false, reason: 'Result was too large or failed browser-cache ownership validation.' };
   }
   await withStore('readwrite', (store) => store.put(prepared));
   localStorage.setItem(LOCAL_STORAGE_VERSION_KEY, String(RESULT_CACHE_VERSION));

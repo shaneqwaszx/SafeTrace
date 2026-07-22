@@ -6,7 +6,8 @@
   "schema_version": 2,
   "release_runtime_layout": {
     "launcher": "SafeTrace.exe or SafeTraceLauncher.exe",
-    "backend": "backend/safetrace-backend.exe",
+    "backend": "backend/safetrace-backend/safetrace-backend.exe",
+    "legacyBackend": "backend/safetrace-backend.exe",
     "embeddingModel": "checkpoints/siglip-base-patch16-224/",
     "fallbackDetector": "checkpoints/yolov8s-seg.pt",
     "primaryDetector": "checkpoints/yolov9c-seg.pt",
@@ -24,7 +25,8 @@
   },
   "backend": {
     "layout": "backend/",
-    "entrypoint": "safetrace-backend.exe",
+    "entrypoint": "safetrace-backend/safetrace-backend.exe",
+    "legacyEntrypoint": "safetrace-backend.exe",
     "manifest": "backend/backend_manifest.json"
   },
   "packaged_assets": {
@@ -74,6 +76,7 @@
     "!dist/SafeTrace/models/chat/*.gguf",
     "!dist/SafeTrace/models/vlm/lightweight-256m/**",
     "!dist/SafeTrace/models/vlm/lightweight-512m/**",
+    "!dist/SafeTrace/models/vlm/enhanced-2b/**",
     "!dist/SafeTrace/models/vlm/enhanced-3b/**"
   ],
   "package_asset_allowlist": [
@@ -84,6 +87,7 @@
     "dist/SafeTrace/models/chat/*.gguf",
     "dist/SafeTrace/models/vlm/lightweight-256m/**",
     "dist/SafeTrace/models/vlm/lightweight-512m/**",
+    "dist/SafeTrace/models/vlm/enhanced-2b/**",
     "dist/SafeTrace/models/vlm/enhanced-3b/**"
   ],
   "notes": "Generated package output belongs under dist/SafeTrace/ and must not be committed. Ollama is optional, not required for the no-extra-steps release package."

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://safetrace.local/schemas/labelled-manifest.schema.json",
+  "title": "SafeTrace labelled evaluation manifest",
+  "type": "object",
+  "required": ["schemaVersion", "datasetId", "samples"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "datasetId": {"type": "string", "minLength": 1},
+    "timestampToleranceSeconds": {"type": "number", "minimum": 0, "default": 2.0},
+    "samples": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/sample"}
+    }
+  },
+  "$defs": {
+    "sample": {
+      "type": "object",
+      "required": ["id", "mediaPath", "sourceRelativePath", "vehicleGroup", "mediaType", "profile", "expectedFinding", "labelStatus", "humanLabelConfidence", "annotationStatus", "reviewerStatus"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "mediaPath": {"type": "string", "minLength": 1},
+        "sourceRelativePath": {"type": "string", "minLength": 1},
+        "vehicleGroup": {"type": "string", "minLength": 1},
+        "mediaType": {"enum": ["video", "image"]},
+        "durationSeconds": {"type": ["number", "null"], "minimum": 0},
+        "profile": {"enum": ["seatbelt_compliance", "helmet_ppe", "phone_use", "hands_on_wheel", "general_safety"]},
+        "expectedFinding": {"enum": ["seatbelt_worn", "seatbelt_missing", "helmet_compliant", "helmet_missing", "phone_use", "hands_on_wheel", "hands_off_steering_wheel", "no_violation", "insufficient_visibility"]},
+        "labelStatus": {"enum": ["positive", "negative", "uncertain", "unlabelled"]},
+        "startSeconds": {"type": ["number", "null"], "minimum": 0},
+        "endSeconds": {"type": ["number", "null"], "minimum": 0},
+        "frameIndex": {"type": ["integer", "null"], "minimum": 0},
+        "boxesReference": {"type": ["string", "null"]},
+        "masksReference": {"type": ["string", "null"]},
+        "humanLabelConfidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "annotatorId": {"type": ["string", "null"]},
+        "annotationStatus": {"enum": ["pending", "reviewed", "approved", "rejected"]},
+        "reviewerId": {"type": ["string", "null"]},
+        "reviewerStatus": {"enum": ["pending", "agrees", "disagrees", "resolved"]},
+        "notes": {"type": ["string", "null"]}
+      },
+      "allOf": [
+        {"if": {"properties": {"labelStatus": {"enum": ["positive", "negative"]}}}, "then": {"required": ["startSeconds", "endSeconds"]}}
+      ]
+    }
+  }
+}

@@ -97,12 +97,9 @@ def test_zip_unsupported_entries_are_reported_per_file(monkeypatch, tmp_path):
     assert response.status_code == 200
     body = response.json()
     assert len(body["acceptedFiles"]) == 1
-    assert body["rejectedFiles"] == [
-        {
-            "filename": "notes.txt",
-            "reason": "Unsupported file type for bulk video analysis.",
-        }
-    ]
+    assert body["rejectedFiles"][0]["filename"] == "notes.txt"
+    assert body["rejectedFiles"][0]["sourceRelativePath"] == "notes.txt"
+    assert body["rejectedFiles"][0]["reason"] == "Unsupported file type for bulk video analysis."
 
 
 def test_zip_file_count_limit_is_enforced(monkeypatch, tmp_path):

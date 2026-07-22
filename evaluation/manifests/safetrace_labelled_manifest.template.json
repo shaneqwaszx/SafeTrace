@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "datasetId": "replace-with-dataset-id",
+  "timestampToleranceSeconds": 2.0,
+  "samples": [
+    {
+      "id": "sample-seatbelt-missing",
+      "mediaPath": "path/to/video.mp4",
+      "sourceRelativePath": "Vehicle-A/Shift-1/video.mp4",
+      "vehicleGroup": "Vehicle-A",
+      "mediaType": "video",
+      "durationSeconds": 60.0,
+      "profile": "seatbelt_compliance",
+      "expectedFinding": "seatbelt_missing",
+      "labelStatus": "positive",
+      "startSeconds": 12.5,
+      "endSeconds": 18.0,
+      "frameIndex": null,
+      "boxesReference": null,
+      "masksReference": null,
+      "humanLabelConfidence": 0.9,
+      "annotatorId": "annotator-1",
+      "annotationStatus": "pending",
+      "reviewerId": "reviewer-1",
+      "reviewerStatus": "pending",
+      "notes": "Replace with independently reviewed footage."
+    }
+  ]
+}

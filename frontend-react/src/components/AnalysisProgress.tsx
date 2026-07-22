@@ -20,6 +20,7 @@ type AnalysisProgressProps = {
   elapsedSeconds?: number | null;
   queueWaitSeconds?: number | null;
   analysisRuntimeSeconds?: number | null;
+  stageElapsedSeconds?: number | null;
   updatedAt?: string | null;
   heartbeatAt?: string | null;
 };
@@ -117,6 +118,7 @@ export function AnalysisProgress({
   elapsedSeconds,
   queueWaitSeconds,
   analysisRuntimeSeconds,
+  stageElapsedSeconds,
   updatedAt,
   heartbeatAt,
 }: AnalysisProgressProps) {
@@ -155,6 +157,7 @@ export function AnalysisProgress({
     ? [
       typeof queueWaitSeconds === 'number' ? `Queue ${formatDurationSeconds(queueWaitSeconds)}` : null,
       typeof analysisRuntimeSeconds === 'number' ? `Analysis ${formatDurationSeconds(analysisRuntimeSeconds)}` : null,
+      typeof stageElapsedSeconds === 'number' ? `Current stage ${formatDurationSeconds(stageElapsedSeconds)}` : null,
     ].filter(Boolean).join(' | ')
     : null;
 

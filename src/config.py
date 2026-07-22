@@ -59,6 +59,55 @@ def _env_csv(key: str, default: str = "") -> tuple[str, ...]:
     return tuple(part.strip().rstrip("/") for part in raw.split(",") if part.strip())
 
 
+# Profiles keep the default desktop experience portable while making the
+# resource-intensive local stack an explicit, testable opt-in.
+_RUNTIME_PROFILES: Dict[str, Dict[str, str]] = {
+    "test": {
+        "device": "cpu", "analysis_safe_mode": "true", "mobile_sam_enabled": "disabled",
+        "mobile_sam_worker_enabled": "false", "enable_vlm": "false", "vlm_enabled": "disabled",
+        "lightweight_vlm_worker_enabled": "false", "chat_enabled": "disabled", "job_concurrency": "1",
+        "preprocess_concurrency": "1", "gpu_inference_concurrency": "1", "mobile_sam_concurrency": "1",
+        "vlm_concurrency": "1", "per_batch_concurrency": "1", "require_gpu": "false",
+        "require_chat": "false", "require_mobilesam": "false", "allow_cpu_fallback": "true",
+    },
+    "portable_fast_local": {
+        # Preserve the established source-runtime behaviour: portable mode
+        # disables optional heavyweight layers, but it is not the legacy
+        # analysis safe-mode switch.  ``local_full`` opts into the strict
+        # guarded runtime explicitly.
+        "device": "auto", "analysis_safe_mode": "false", "mobile_sam_enabled": "disabled",
+        # ``auto`` leaves visual review inactive until explicitly selected;
+        # unlike ``disabled`` it preserves the existing API contract for a
+        # developer/tester who explicitly selects an installed local profile.
+        "mobile_sam_worker_enabled": "false", "enable_vlm": "false", "vlm_enabled": "auto",
+        "lightweight_vlm_worker_enabled": "false", "chat_enabled": "auto", "job_concurrency": "1",
+        "preprocess_concurrency": "2", "gpu_inference_concurrency": "1", "mobile_sam_concurrency": "1",
+        "vlm_concurrency": "1", "per_batch_concurrency": "1", "require_gpu": "false",
+        "require_chat": "false", "require_mobilesam": "false", "allow_cpu_fallback": "true",
+    },
+    "local_full": {
+        "device": "cuda", "analysis_safe_mode": "true", "safe_mode_allow_mobilesam": "true",
+        "mobile_sam_enabled": "auto", "mobile_sam_worker_enabled": "true", "enable_vlm": "true",
+        "vlm_enabled": "auto", "lightweight_vlm_worker_enabled": "true", "chat_enabled": "auto",
+        "job_concurrency": "2", "preprocess_concurrency": "2", "gpu_inference_concurrency": "2",
+        "mobile_sam_concurrency": "1", "vlm_concurrency": "1", "per_batch_concurrency": "2",
+        "require_gpu": "true", "require_chat": "true", "require_mobilesam": "true", "allow_cpu_fallback": "false",
+    },
+}
+
+
+def _runtime_profile_name() -> str:
+    profile = _env("SAFETRACE_RUNTIME_PROFILE", "portable_fast_local").strip().lower()
+    return profile if profile in _RUNTIME_PROFILES else "portable_fast_local"
+
+
+def _profiled_env(key: str, profile_key: str, default: str) -> str:
+    """An explicit environment setting always wins over the selected profile."""
+    if key in os.environ:
+        return os.environ[key]
+    return _RUNTIME_PROFILES[_runtime_profile_name()].get(profile_key, default)
+
+
 def _chat_speed_profile() -> str:
     return _env("SAFETRACE_CHAT_SPEED_PROFILE", "balanced").strip().lower() or "balanced"
 
@@ -76,6 +125,9 @@ PROJECT_ROOT = Path(_env("SAFETRACE_PROJECT_ROOT", str(Path(__file__).resolve().
 
 @dataclass
 class Settings:
+    # ---- Runtime profile ----
+    runtime_profile: str = field(default_factory=_runtime_profile_name)
+
     # ---- Paths ----
     project_root: Path = PROJECT_ROOT
     data_dir: Path = field(default_factory=lambda: Path(_env("SAFETRACE_DATA_DIR", str(PROJECT_ROOT / "data"))))
@@ -175,7 +227,9 @@ class Settings:
         default_factory=lambda: _env_float("SAFETRACE_LIGHTWEIGHT_VLM_TOTAL_BUDGET_SECONDS", 0.0)
     )
     lightweight_vlm_worker_enabled: bool = field(
-        default_factory=lambda: _env_bool("SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED", False)
+        default_factory=lambda: _profiled_env(
+            "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED", "lightweight_vlm_worker_enabled", "false"
+        ).strip().lower() in {"1", "true", "yes", "y", "on"}
     )
     lightweight_vlm_worker_timeout_seconds: float = field(
         default_factory=lambda: _env_float("SAFETRACE_LIGHTWEIGHT_VLM_WORKER_TIMEOUT_SECONDS", 60.0)
@@ -185,36 +239,55 @@ class Settings:
     vlm_disable_after_timeout: bool = field(default_factory=lambda: _env_bool("SAFETRACE_VLM_DISABLE_AFTER_TIMEOUT", True))
 
     # ---- Runtime ----
-    device: str = field(default_factory=lambda: _env("SAFETRACE_DEVICE", "auto"))
+    device: str = field(default_factory=lambda: _profiled_env("SAFETRACE_DEVICE", "device", "auto"))
+    require_gpu: bool = field(default_factory=lambda: _profiled_env("SAFETRACE_REQUIRE_GPU", "require_gpu", "false").strip().lower() in {"1", "true", "yes", "y", "on"})
+    require_chat: bool = field(default_factory=lambda: _profiled_env("SAFETRACE_REQUIRE_CHAT", "require_chat", "false").strip().lower() in {"1", "true", "yes", "y", "on"})
+    require_mobilesam: bool = field(default_factory=lambda: _profiled_env("SAFETRACE_REQUIRE_MOBILESAM", "require_mobilesam", "false").strip().lower() in {"1", "true", "yes", "y", "on"})
+    allow_cpu_fallback: bool = field(default_factory=lambda: _profiled_env("SAFETRACE_ALLOW_CPU_FALLBACK", "allow_cpu_fallback", "true").strip().lower() in {"1", "true", "yes", "y", "on"})
     enable_gpu_auto: bool = field(default_factory=lambda: _env_bool("SAFETRACE_ENABLE_GPU_AUTO", True))
     lightweight_vlm_device: str = field(default_factory=lambda: _env("SAFETRACE_LIGHTWEIGHT_VLM_DEVICE", "auto"))
     enhanced_vlm_device: str = field(default_factory=lambda: _env("SAFETRACE_ENHANCED_VLM_DEVICE", "cuda"))
     mobile_sam_device: str = field(default_factory=lambda: _env("SAFETRACE_MOBILESAM_DEVICE", "auto"))
     offline: bool = field(default_factory=lambda: _env_bool("SAFETRACE_OFFLINE", True))
-    analysis_safe_mode: bool = field(default_factory=lambda: _env_bool("SAFETRACE_ANALYSIS_SAFE_MODE", False))
+    analysis_safe_mode: bool = field(
+        default_factory=lambda: _profiled_env("SAFETRACE_ANALYSIS_SAFE_MODE", "analysis_safe_mode", "false")
+        .strip().lower() in {"1", "true", "yes", "y", "on"}
+    )
     safe_mode_allow_mobilesam: bool = field(
-        default_factory=lambda: _env_bool("SAFETRACE_SAFE_MODE_ALLOW_MOBILESAM", False)
+        default_factory=lambda: _profiled_env(
+            "SAFETRACE_SAFE_MODE_ALLOW_MOBILESAM", "safe_mode_allow_mobilesam", "false"
+        ).strip().lower() in {"1", "true", "yes", "y", "on"}
     )
     analysis_job_timeout_seconds: float = field(
         default_factory=lambda: _env_float("SAFETRACE_ANALYSIS_JOB_TIMEOUT_SECONDS", 600.0)
     )
-    enable_vlm: bool = field(default_factory=lambda: _env_bool("SAFETRACE_ENABLE_VLM", False))
-    mobile_sam_enabled: str = field(default_factory=lambda: _env("SAFETRACE_MOBILESAM_ENABLED", "disabled"))
+    enable_vlm: bool = field(
+        default_factory=lambda: _profiled_env("SAFETRACE_ENABLE_VLM", "enable_vlm", "false")
+        .strip().lower() in {"1", "true", "yes", "y", "on"}
+    )
+    mobile_sam_enabled: str = field(
+        default_factory=lambda: _profiled_env("SAFETRACE_MOBILESAM_ENABLED", "mobile_sam_enabled", "disabled")
+    )
     mobile_sam_timeout_seconds: float = field(
         default_factory=lambda: _env_float("SAFETRACE_MOBILESAM_TIMEOUT_SECONDS", 20.0)
     )
     mobile_sam_worker_enabled: bool = field(
-        default_factory=lambda: _env_bool("SAFETRACE_MOBILESAM_WORKER_ENABLED", False)
+        default_factory=lambda: _profiled_env(
+            "SAFETRACE_MOBILESAM_WORKER_ENABLED", "mobile_sam_worker_enabled", "false"
+        ).strip().lower() in {"1", "true", "yes", "y", "on"}
     )
     mobile_sam_worker_timeout_seconds: float = field(
         default_factory=lambda: _env_float("SAFETRACE_MOBILESAM_WORKER_TIMEOUT_SECONDS", 60.0)
     )
-    vlm_enabled: str = field(default_factory=lambda: _env("SAFETRACE_VLM_ENABLED", "auto"))
+    vlm_enabled: str = field(default_factory=lambda: _profiled_env("SAFETRACE_VLM_ENABLED", "vlm_enabled", "auto"))
     serve_frontend: bool = field(default_factory=lambda: _env_bool("SAFETRACE_SERVE_FRONTEND", False))
     frontend_dist: Path = field(
         default_factory=lambda: Path(_env("SAFETRACE_FRONTEND_DIST", str(PROJECT_ROOT / "frontend-react" / "dist")))
     )
     allowed_origins: tuple[str, ...] = field(default_factory=lambda: _env_csv("SAFETRACE_ALLOWED_ORIGINS"))
+    include_local_cors_origins: bool = field(
+        default_factory=lambda: _env_bool("SAFETRACE_INCLUDE_LOCAL_CORS_ORIGINS", True)
+    )
 
     # ---- Sampling / pipeline ----
     frame_fps: float = field(default_factory=lambda: _env_float("SAFETRACE_FPS", 1.0))
@@ -227,11 +300,147 @@ class Settings:
     max_video_duration_seconds: float = field(
         default_factory=lambda: _env_float("SAFETRACE_MAX_VIDEO_SECONDS", 0.0)
     )
-    worker_concurrency: int = field(default_factory=lambda: _env_int("SAFETRACE_WORKER_CONCURRENCY", 1))
-    analysis_concurrency: int = field(
-        default_factory=lambda: _env_int("SAFETRACE_ANALYSIS_CONCURRENCY", _env_int("SAFETRACE_WORKER_CONCURRENCY", 1))
+    worker_concurrency: int = field(
+        default_factory=lambda: _env_int(
+            "SAFETRACE_WORKER_CONCURRENCY",
+            int(_profiled_env("SAFETRACE_JOB_CONCURRENCY", "job_concurrency", "1")),
+        )
     )
-    vlm_concurrency: int = field(default_factory=lambda: _env_int("SAFETRACE_VLM_CONCURRENCY", 1))
+    job_concurrency: int = field(
+        default_factory=lambda: _env_int(
+            "SAFETRACE_JOB_CONCURRENCY",
+            int(_profiled_env("SAFETRACE_JOB_CONCURRENCY", "job_concurrency", "1")),
+        )
+    )
+    analysis_concurrency: int = field(
+        default_factory=lambda: _env_int(
+            "SAFETRACE_ANALYSIS_CONCURRENCY",
+            _env_int("SAFETRACE_JOB_CONCURRENCY", int(_profiled_env("SAFETRACE_JOB_CONCURRENCY", "job_concurrency", "1"))),
+        )
+    )
+    vlm_concurrency: int = field(
+        default_factory=lambda: _env_int(
+            "SAFETRACE_VLM_CONCURRENCY", int(_profiled_env("SAFETRACE_VLM_CONCURRENCY", "vlm_concurrency", "1"))
+        )
+    )
+    batch_max_active_jobs: int = field(
+        default_factory=lambda: _env_int(
+            "SAFETRACE_BATCH_MAX_ACTIVE_JOBS",
+            int(_profiled_env("SAFETRACE_PER_BATCH_CONCURRENCY", "per_batch_concurrency", "1")),
+        )
+    )
+    per_batch_concurrency: int = field(
+        default_factory=lambda: _env_int(
+            "SAFETRACE_PER_BATCH_CONCURRENCY",
+            int(_profiled_env("SAFETRACE_PER_BATCH_CONCURRENCY", "per_batch_concurrency", "1")),
+        )
+    )
+    cpu_preprocessing_concurrency: int = field(
+        default_factory=lambda: _env_int(
+            "SAFETRACE_PREPROCESS_CONCURRENCY",
+            _env_int(
+                "SAFETRACE_CPU_PREPROCESSING_CONCURRENCY",
+                int(_profiled_env("SAFETRACE_PREPROCESS_CONCURRENCY", "preprocess_concurrency", "2")),
+            ),
+        )
+    )
+    preprocess_concurrency: int = field(
+        default_factory=lambda: _env_int(
+            "SAFETRACE_PREPROCESS_CONCURRENCY", int(_profiled_env("SAFETRACE_PREPROCESS_CONCURRENCY", "preprocess_concurrency", "2"))
+        )
+    )
+    gpu_detector_concurrency: int = field(
+        default_factory=lambda: _env_int(
+            "SAFETRACE_GPU_INFERENCE_CONCURRENCY",
+            _env_int(
+                "SAFETRACE_GPU_DETECTOR_CONCURRENCY",
+                int(_profiled_env("SAFETRACE_GPU_INFERENCE_CONCURRENCY", "gpu_inference_concurrency", "1")),
+            ),
+        )
+    )
+    gpu_inference_concurrency: int = field(
+        default_factory=lambda: _env_int(
+            "SAFETRACE_GPU_INFERENCE_CONCURRENCY", int(_profiled_env("SAFETRACE_GPU_INFERENCE_CONCURRENCY", "gpu_inference_concurrency", "1"))
+        )
+    )
+    mobile_sam_concurrency: int = field(
+        default_factory=lambda: _env_int(
+            "SAFETRACE_MOBILESAM_CONCURRENCY", int(_profiled_env("SAFETRACE_MOBILESAM_CONCURRENCY", "mobile_sam_concurrency", "1"))
+        )
+    )
+    scheduler_policy: str = field(default_factory=lambda: _env("SAFETRACE_SCHEDULER_POLICY", "oldest_batch_first"))
+    adaptive_workers_enabled: bool = field(
+        default_factory=lambda: _env_bool("SAFETRACE_ADAPTIVE_WORKERS_ENABLED", _runtime_profile_name() == "local_full")
+    )
+    adaptive_worker_min: int = field(default_factory=lambda: _env_int("SAFETRACE_WORKER_MIN", 2))
+    adaptive_worker_max: int = field(default_factory=lambda: _env_int("SAFETRACE_WORKER_MAX", 3))
+    # This guard is intentionally opt-in until the real model-backed Phase U
+    # comparison establishes that worker three is stable on this device.
+    adaptive_third_worker_validated: bool = field(
+        default_factory=lambda: _env_bool("SAFETRACE_THIRD_WORKER_VALIDATED", False)
+    )
+    adaptive_scale_up_queue_depth: int = field(
+        default_factory=lambda: _env_int("SAFETRACE_SCALE_UP_QUEUE_DEPTH", 3)
+    )
+    adaptive_scale_up_sustain_seconds: float = field(
+        default_factory=lambda: _env_float("SAFETRACE_SCALE_UP_SUSTAIN_SECONDS", 15.0)
+    )
+    adaptive_scale_down_idle_seconds: float = field(
+        default_factory=lambda: _env_float("SAFETRACE_SCALE_DOWN_IDLE_SECONDS", 60.0)
+    )
+    adaptive_scale_cooldown_seconds: float = field(
+        default_factory=lambda: _env_float("SAFETRACE_SCALE_COOLDOWN_SECONDS", 60.0)
+    )
+    adaptive_gpu_free_memory_margin_mb: float = field(
+        default_factory=lambda: _env_float("SAFETRACE_GPU_FREE_MEMORY_MARGIN_MB", 4096.0)
+    )
+    adaptive_system_free_memory_margin_mb: float = field(
+        default_factory=lambda: _env_float("SAFETRACE_SYSTEM_FREE_MEMORY_MARGIN_MB", 4096.0)
+    )
+    adaptive_max_recent_error_rate: float = field(
+        default_factory=lambda: _env_float("SAFETRACE_ADAPTIVE_MAX_RECENT_ERROR_RATE", 0.2)
+    )
+    mobile_sam_frame_limit: int = field(default_factory=lambda: _env_int("SAFETRACE_MOBILESAM_FRAME_LIMIT", 5))
+    max_queued_jobs: int = field(default_factory=lambda: _env_int("SAFETRACE_MAX_QUEUED_JOBS", 250))
+    min_free_disk_mb: float = field(default_factory=lambda: _env_float("SAFETRACE_MIN_FREE_DISK_MB", 2048.0))
+    min_available_memory_mb: float = field(
+        default_factory=lambda: _env_float("SAFETRACE_MIN_AVAILABLE_MEMORY_MB", 1024.0)
+    )
+    diagnostic_frames_enabled: bool = field(
+        default_factory=lambda: _env_bool("SAFETRACE_DIAGNOSTIC_FRAMES_ENABLED", False)
+    )
+    mid_vlm_enabled: bool = field(default_factory=lambda: _env_bool("SAFETRACE_MID_VLM_ENABLED", False))
+    mid_vlm_model_path: Path = field(
+        default_factory=lambda: Path(
+            _env("SAFETRACE_MID_VLM_MODEL_PATH", str(Path("models") / "vlm" / "lightweight-512m"))
+        )
+    )
+    mid_vlm_device: str = field(default_factory=lambda: _env("SAFETRACE_MID_VLM_DEVICE", "cuda"))
+    mid_vlm_concurrency: int = field(default_factory=lambda: _env_int("SAFETRACE_MID_VLM_CONCURRENCY", 1))
+    mid_vlm_max_frames: int = field(default_factory=lambda: _env_int("SAFETRACE_MID_VLM_MAX_FRAMES", 2))
+    mid_vlm_timeout_seconds: float = field(
+        default_factory=lambda: _env_float("SAFETRACE_MID_VLM_TIMEOUT_SECONDS", 90.0)
+    )
+
+    # Comprehensive Review is additive. Fast Local values above remain unchanged.
+    comprehensive_review_fps: float = field(
+        default_factory=lambda: _env_float("SAFETRACE_COMPREHENSIVE_REVIEW_FPS", 2.0)
+    )
+    comprehensive_review_max_frames: int = field(
+        default_factory=lambda: _env_int("SAFETRACE_COMPREHENSIVE_REVIEW_MAX_FRAMES", 1200)
+    )
+    comprehensive_review_top_k: int = field(
+        default_factory=lambda: _env_int("SAFETRACE_COMPREHENSIVE_REVIEW_TOP_K", 12)
+    )
+    comprehensive_candidate_window_seconds: float = field(
+        default_factory=lambda: _env_float("SAFETRACE_COMPREHENSIVE_CANDIDATE_WINDOW_SECONDS", 3.0)
+    )
+    comprehensive_max_segmentation_frames: int = field(
+        default_factory=lambda: _env_int("SAFETRACE_COMPREHENSIVE_MAX_SEGMENTATION_FRAMES", 8)
+    )
+    comprehensive_max_vlm_frames: int = field(
+        default_factory=lambda: _env_int("SAFETRACE_COMPREHENSIVE_MAX_VLM_FRAMES", 5)
+    )
 
     # ---- Local API hardening ----
     max_upload_mb: float = field(default_factory=lambda: _env_float("SAFETRACE_MAX_UPLOAD_MB", 512.0))
@@ -239,11 +448,29 @@ class Settings:
     bulk_max_uncompressed_mb: float = field(
         default_factory=lambda: _env_float("SAFETRACE_BULK_MAX_UNCOMPRESSED_MB", 2048.0)
     )
+    bulk_max_compression_ratio: float = field(
+        default_factory=lambda: _env_float("SAFETRACE_BULK_MAX_COMPRESSION_RATIO", 100.0)
+    )
     job_retention_hours: float = field(default_factory=lambda: _env_float("SAFETRACE_JOB_RETENTION_HOURS", 24.0))
     stale_running_minutes: float = field(default_factory=lambda: _env_float("SAFETRACE_STALE_RUNNING_MINUTES", 30.0))
+    recovery_policy: str = field(default_factory=lambda: _env("SAFETRACE_RECOVERY_POLICY", "prompt"))
+    completed_retention_days: float = field(default_factory=lambda: _env_float("SAFETRACE_COMPLETED_RETENTION_DAYS", 30.0))
+    failed_retention_days: float = field(default_factory=lambda: _env_float("SAFETRACE_FAILED_RETENTION_DAYS", 7.0))
+    recovery_retention_hours: float = field(default_factory=lambda: _env_float("SAFETRACE_RECOVERY_RETENTION_HOURS", 72.0))
+    cache_retention_days: float = field(default_factory=lambda: _env_float("SAFETRACE_CACHE_RETENTION_DAYS", 14.0))
+    cache_max_gb: float = field(default_factory=lambda: _env_float("SAFETRACE_CACHE_MAX_GB", 5.0))
+    log_retention_days: float = field(default_factory=lambda: _env_float("SAFETRACE_LOG_RETENTION_DAYS", 14.0))
+    min_free_disk_gb: float = field(default_factory=lambda: _env_float("SAFETRACE_MIN_FREE_DISK_GB", 2.0))
+    retention_scheduler_enabled: bool = field(default_factory=lambda: _env_bool("SAFETRACE_RETENTION_SCHEDULER_ENABLED", True))
+    retention_interval_minutes: float = field(default_factory=lambda: _env_float("SAFETRACE_RETENTION_INTERVAL_MINUTES", 60.0))
+    retention_startup_delay_seconds: float = field(default_factory=lambda: _env_float("SAFETRACE_RETENTION_STARTUP_DELAY_SECONDS", 30.0))
+    job_retry_max_attempts: int = field(default_factory=lambda: _env_int("SAFETRACE_JOB_RETRY_MAX_ATTEMPTS", 2))
+    job_retry_backoff_seconds: float = field(
+        default_factory=lambda: _env_float("SAFETRACE_JOB_RETRY_BACKOFF_SECONDS", 5.0)
+    )
 
     # ---- Optional SafeTrace assistant ----
-    chat_enabled: str = field(default_factory=lambda: _env("SAFETRACE_CHAT_ENABLED", "auto"))
+    chat_enabled: str = field(default_factory=lambda: _profiled_env("SAFETRACE_CHAT_ENABLED", "chat_enabled", "auto"))
     chat_provider: str = field(default_factory=lambda: _env("SAFETRACE_CHAT_PROVIDER", "packaged_llamacpp"))
     chat_speed_profile: str = field(default_factory=_chat_speed_profile)
     chat_model_path: Path = field(

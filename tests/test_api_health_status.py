@@ -111,6 +111,17 @@ def test_device_gateway_selects_cpu_for_lightweight_when_cuda_unavailable(monkey
     assert "CUDA" in payload["components"]["enhancedVlm"]["reason"]
 
 
+def test_cloud_cors_can_exclude_local_origins(monkeypatch):
+    monkeypatch.setattr(server_module.SETTINGS, "include_local_cors_origins", False)
+    monkeypatch.setattr(server_module.SETTINGS, "allowed_origins", ("https://cloud.example.test",))
+    monkeypatch.setenv("SAFETRACE_ALLOWED_ORIGINS", "https://api-client.example.test")
+
+    assert server_module._cors_allowed_origins() == [
+        "https://cloud.example.test",
+        "https://api-client.example.test",
+    ]
+
+
 def test_device_gateway_selects_cuda_for_auto_components_when_available(monkeypatch):
     monkeypatch.setattr(
         device_gateway,

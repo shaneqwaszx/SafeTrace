@@ -2,6 +2,8 @@ import { AlertTriangle, BarChart3, ClipboardCheck, Copy, Database, RefreshCcw, S
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AnalysisProgress } from './components/AnalysisProgress';
 import { AnalysisSummary } from './components/AnalysisSummary';
+import { AnalysisSetupPanel } from './components/AnalysisSetupPanel';
+import { AnalysisSetupSummary } from './components/AnalysisSetupSummary';
 import { AnnotationViewer } from './components/AnnotationViewer';
 import { AppShell } from './components/AppShell';
 import { EvidenceFrames } from './components/EvidenceFrames';
@@ -15,6 +17,10 @@ import { StatisticsPanel } from './components/StatisticsPanel';
 import { TimelineVisualization } from './components/TimelineVisualization';
 import { UploadPanel } from './components/UploadPanel';
 import { VideoQueue } from './components/VideoQueue';
+import { ValidationDashboard } from './components/ValidationDashboard';
+import { RecoveryBanner } from './components/RecoveryBanner';
+import { OperationsWorkspace } from './components/OperationsWorkspace';
+import { ResultLifecycleActions } from './components/ResultLifecycleActions';
 import { ViolationSummary } from './components/ViolationSummary';
 import { sampleMedia } from './data/mockAnalysis';
 import {
@@ -33,15 +39,28 @@ import {
   deleteJob,
   discoverBackendRuntime,
   getBatchStatus,
+  getDashboardSummary,
+  getRecoverySummary,
+  getStorageSummary,
   getActiveApiBase,
   getJobResult,
   getJobStatus,
   getMockMediaLibrary,
   runBackendAnalysis,
   runBackendBatchAnalysis,
+  retryFailedBatchJobs,
+  pauseBatch,
+  resumeBatch,
   runMockAnalysis,
   updateVlmSettings,
+  resumeRecovery,
+  restartRecoveryFresh,
+  deferRecovery,
+  discardRecovery,
+  previewStorageCleanup,
+  applyStorageCleanup,
 } from './services/analysisService';
+import { ResultRequestCoordinator, resultBelongsToJob } from './services/resultIsolation';
 import {
   type CachedResultEntry,
   clearCachedResults,
@@ -57,11 +76,16 @@ import type {
   AnalysisResult,
   AnalysisSettings,
   BatchStatus,
+  BatchAcceptedFile,
+  BatchHierarchyNode,
   BackendConnectionState,
   JobStatus,
   MediaItem,
   SystemStatus,
   VlmExplanationProfileId,
+  RecoverySummary,
+  StorageSummary,
+  DashboardSummary,
 } from './types/analysis';
 import { formatFileSize } from './utils/formatters';
 import { copyJobIdToClipboard, formatShortJobId } from './utils/jobIds';
@@ -82,10 +106,15 @@ const SAMPLE_QUERY_BY_MEDIA_ID: Record<string, string> = {
 };
 
 const TERMINAL_JOB_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+const ACTIVE_BACKEND_JOB_STATUSES = [
+  'queued', 'waiting_for_capacity', 'waiting_for_job_slot', 'waiting_for_gpu', 'waiting_for_mobilesam',
+  'waiting_for_vlm', 'running_preprocess', 'running_detector', 'running_refinement', 'running_report',
+  'running', 'retry_wait', 'recovering', 'paused',
+];
 
 function jobStatusToMediaStatus(status: JobStatus['status']): MediaItem['status'] {
-  if (status === 'queued') return 'queued';
-  if (status === 'running') return 'processing';
+  if (['queued', 'waiting_for_capacity', 'waiting_for_job_slot', 'waiting_for_gpu', 'waiting_for_mobilesam', 'waiting_for_vlm', 'retry_wait', 'recovering', 'paused'].includes(status)) return 'queued';
+  if (['running', 'running_preprocess', 'running_detector', 'running_refinement', 'running_report'].includes(status)) return 'processing';
   if (status === 'completed') return 'completed';
   return 'error';
 }
@@ -277,10 +306,13 @@ function getSelectionSize(files: File[]): string {
   return formatFileSize(total);
 }
 
-function App() {
+function SafeTraceApp() {
   const previewMode = SAFETRACE_ENABLE_PREVIEW_MODE;
   const [query, setQuery] = useState(DEFAULT_QUERY);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+  const [resultByJobId, setResultByJobId] = useState<Record<string, AnalysisResult>>({});
+  const [resultRequestStateByJobId, setResultRequestStateByJobId] = useState<Record<string, 'idle' | 'loading' | 'ready' | 'error'>>({});
+  const [resultIntegrityWarning, setResultIntegrityWarning] = useState<string | null>(null);
   const [mediaLibrary, setMediaLibrary] = useState<MediaItem[]>(previewMode ? [sampleMedia] : []);
   const [selectedMedia, setSelectedMedia] = useState<MediaItem | null>(previewMode ? sampleMedia : null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -296,6 +328,7 @@ function App() {
       enhancedVlmExplanations: vlmSettings.vlmEnabled,
       deviceMode: 'Auto',
       useCaseProfile: resolveUseCaseProfile(),
+      reviewMode: 'fast_local',
     };
   });
   const [activeAnalysisMediaIds, setActiveAnalysisMediaIds] = useState<Record<string, true>>({});
@@ -318,10 +351,16 @@ function App() {
   const [cachedEntries, setCachedEntries] = useState<Record<string, CachedResultEntry>>({});
   const [cacheMessage, setCacheMessage] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<'analysis' | 'insights'>('analysis');
+  const [recoverySummary, setRecoverySummary] = useState<RecoverySummary | null>(null);
+  const [storageSummary, setStorageSummary] = useState<StorageSummary | null>(null);
+  const [dashboardSummary, setDashboardSummary] = useState<DashboardSummary | null>(null);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
   const localFilesRef = useRef<Record<string, File>>({});
   const localFileGroupsRef = useRef<Record<string, File[]>>({});
   const objectUrlsRef = useRef<Set<string>>(new Set());
   const selectedMediaIdRef = useRef<string | null>(selectedMedia?.id ?? null);
+  const selectedBatchJobIdRef = useRef<string | null>(null);
+  const resultRequestRef = useRef(new ResultRequestCoordinator());
   const activeAnalysisMediaIdsRef = useRef<Record<string, true>>({});
 
   const backendConnected = backendState === 'connected';
@@ -334,6 +373,12 @@ function App() {
   useEffect(() => {
     selectedMediaIdRef.current = selectedMedia?.id ?? null;
   }, [selectedMedia?.id]);
+
+  useEffect(() => {
+    selectedBatchJobIdRef.current = selectedBatchJobId;
+  }, [selectedBatchJobId]);
+
+  useEffect(() => () => resultRequestRef.current.cancel(), []);
 
   useEffect(() => {
     activeAnalysisMediaIdsRef.current = activeAnalysisMediaIds;
@@ -379,6 +424,57 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!backendConnected) return;
+    let active = true;
+    Promise.all([getRecoverySummary(), getStorageSummary(), getDashboardSummary()])
+      .then(([recovery, storage, dashboard]) => {
+        if (!active) return;
+        setRecoverySummary(recovery);
+        setStorageSummary(storage);
+        setDashboardSummary(dashboard);
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [backendConnected]);
+
+  async function handleRecoveryAction(
+    action: 'continue' | 'restartFresh' | 'discard' | 'later',
+    jobIds: string[],
+    purgeCompatibleCache = false,
+  ) {
+    if (!recoverySummary) return;
+    if (action === 'discard' && !window.confirm(`Discard ${jobIds.length} interrupted job${jobIds.length === 1 ? '' : 's'} and their owned temporary data?`)) return;
+    if (action === 'restartFresh' && !window.confirm(`Restart ${jobIds.length} interrupted job${jobIds.length === 1 ? '' : 's'} from the beginning? The original uploads will be preserved, but their checkpoints and partial results will be removed.`)) return;
+    if (action === 'restartFresh' && purgeCompatibleCache && !window.confirm('Also purge only reusable cache entries compatible with the selected source files? Unrelated and shared cache entries will be preserved.')) return;
+    setRecoveryBusy(true);
+    try {
+      if (action === 'continue') await resumeRecovery(jobIds);
+      if (action === 'restartFresh') await restartRecoveryFresh(jobIds, { purgeCompatibleCache });
+      if (action === 'discard') await discardRecovery(jobIds);
+      if (action === 'later') await deferRecovery(jobIds);
+      const [recovery, storage, dashboard] = await Promise.all([getRecoverySummary(), getStorageSummary(), getDashboardSummary()]);
+      setRecoverySummary(recovery);
+      setStorageSummary(storage);
+      setDashboardSummary(dashboard);
+    } finally {
+      setRecoveryBusy(false);
+    }
+  }
+
+  async function handleCleanupPreview(): Promise<string> {
+    const payload = await previewStorageCleanup(['expired_completed', 'expired_failed', 'expired_recovery', 'orphaned_temp', 'result_cache']);
+    return `${String(payload.candidateCount || 0)} cleanup candidates; estimated ${formatFileSize(Number(payload.estimatedReclaimBytes || 0))}.`;
+  }
+
+  async function handleCleanupApply(): Promise<string> {
+    const payload = await applyStorageCleanup(['expired_completed', 'expired_failed', 'expired_recovery', 'orphaned_temp', 'result_cache']);
+    const [storage, dashboard] = await Promise.all([getStorageSummary(), getDashboardSummary()]);
+    setStorageSummary(storage);
+    setDashboardSummary(dashboard);
+    return `Cleanup reclaimed ${formatFileSize(Number(payload.actualReclaimedBytes || 0))}.`;
+  }
+
   function rememberCachedEntry(entry: CachedResultEntry) {
     setCachedEntries((current) => ({ ...current, [entry.cacheKey]: entry }));
     if (!PERSIST_BROWSER_RESULT_CACHE) return;
@@ -400,6 +496,20 @@ function App() {
     ));
   }
 
+  function queueRuntimePatchFromJob(job: JobStatus | AnalysisResult | null | undefined): Partial<MediaItem> {
+    if (!job) return {};
+    const summary = job.engineRuntimeSummary ?? null;
+    return {
+      jobRuntimeLabel: job.jobRuntimeLabel ?? summary?.runtime ?? null,
+      requestedModeLabel: job.requestedModeLabel ?? summary?.requestedMode ?? null,
+      actualReviewLabel: job.explanationOutcomeLabel ?? summary?.actualReview ?? null,
+      actualDeviceLabel: job.actualDeviceLabel ?? summary?.device ?? null,
+      vlmStatusLabel: summary?.vlm ?? (job.vlmFallbackReasonLabel ? `Fallback: ${job.vlmFallbackReasonLabel}` : null),
+      mobileSamStatusLabel: summary?.mobileSam ?? null,
+      elapsedSeconds: job.elapsedSeconds ?? null,
+    };
+  }
+
   function updateMediaItem(mediaId: string, patch: Partial<MediaItem>) {
     setMediaLibrary((current) => current.map((item) => (
       item.id === mediaId ? { ...item, ...patch } : item
@@ -416,6 +526,27 @@ function App() {
       delete next[mediaId];
       return next;
     });
+  }
+
+  function commitVisibleResult(result: AnalysisResult, expectedJobId?: string | null): boolean {
+    const owner = expectedJobId || result.jobId;
+    if (owner && !resultBelongsToJob(result, owner)) {
+      setResultIntegrityWarning(
+        `SafeTrace blocked a result response because its evidence ownership did not match ${owner}.`,
+      );
+      return false;
+    }
+    if (result.jobId) {
+      setResultByJobId((current) => ({ ...current, [result.jobId as string]: result }));
+      setResultRequestStateByJobId((current) => ({ ...current, [result.jobId as string]: 'ready' }));
+    }
+    setResultIntegrityWarning(null);
+    setAnalysisResult(result);
+    return true;
+  }
+
+  function cancelPendingResultRequest() {
+    resultRequestRef.current.cancel();
   }
 
   function updateMediaJobReference(
@@ -484,7 +615,9 @@ function App() {
       return false;
     }
 
-    setAnalysisResult(restoredResult ?? null);
+    const restoredOwner = entry?.selectedJobId ?? childEntry?.jobId ?? restoredResult?.jobId;
+    if (restoredResult && restoredOwner && !commitVisibleResult(restoredResult, restoredOwner)) return false;
+    if (!restoredResult) setAnalysisResult(null);
     setJobStatus(childEntry?.jobStatus ?? entry?.jobStatus ?? null);
     setBatchStatus(entry?.batchStatus ?? null);
     setSelectedBatchJobId(entry?.selectedJobId ?? childEntry?.jobId ?? null);
@@ -500,7 +633,8 @@ function App() {
     setError(null);
     setErrorDetails(null);
     setCacheMessage(null);
-    setAnalysisResult(entry.result);
+    const entryOwner = entry.selectedJobId ?? entry.jobId ?? entry.result.jobId;
+    if (entryOwner && !commitVisibleResult(entry.result, entryOwner)) return;
     setJobStatus(entry.jobStatus ?? null);
     setBatchStatus(entry.batchStatus ?? null);
     setSelectedBatchJobId(entry.selectedJobId ?? entry.jobId ?? null);
@@ -614,7 +748,7 @@ function App() {
         queryText: result.query,
       }));
       if (selectedMediaIdRef.current === media.id) {
-        setAnalysisResult(result);
+        commitVisibleResult(result, jobId);
         setAnalysisMode('backend');
       }
     } catch {
@@ -701,6 +835,7 @@ function App() {
   }
 
   function handleSelectMedia(media: MediaItem) {
+    cancelPendingResultRequest();
     const knownSampleQueries = Object.values(SAMPLE_QUERY_BY_MEDIA_ID);
     const suggestedQuery = SAMPLE_QUERY_BY_MEDIA_ID[media.id];
     setSelectedMedia(media);
@@ -774,7 +909,10 @@ function App() {
 
   function handleSettingsChange(nextSettings: AnalysisSettings) {
     const profileChanged = nextSettings.useCaseProfile.profileId !== settings.useCaseProfile.profileId;
-    const nextQuery = profileChanged ? getUseCaseProfileDefaultQuery(nextSettings.useCaseProfile) : query;
+    const queryWasProfileDefault = !query.trim() || query === settings.useCaseProfile.defaultQuery;
+    const nextQuery = profileChanged && queryWasProfileDefault
+      ? getUseCaseProfileDefaultQuery(nextSettings.useCaseProfile)
+      : query;
     const nextProfile = withEffectiveProfile(nextSettings.useCaseProfile, nextQuery);
     const normalizedSettings = {
       ...nextSettings,
@@ -882,7 +1020,10 @@ function App() {
         setActiveStep(progressToStep(status.progress));
       }
       if (media) {
-        updateMediaStatus(media.id, jobStatusToMediaStatus(status.status));
+        updateMediaItem(media.id, {
+          status: jobStatusToMediaStatus(status.status),
+          ...queueRuntimePatchFromJob(status),
+        });
         rememberCachedEntry(buildCacheEntry({
           media,
           jobStatus: status,
@@ -936,7 +1077,8 @@ function App() {
         file.status === 'completed' || file.status === 'failed' || file.status === 'cancelled'
       )).length;
       const representativeJobIdCandidate = (
-        status.acceptedFiles.find((file) => file.status === 'running')?.jobId
+        status.acceptedFiles.find((file) => ['running', 'running_preprocess', 'running_detector', 'running_refinement', 'running_report'].includes(file.status))?.jobId
+        ?? status.acceptedFiles.find((file) => ['waiting_for_capacity', 'waiting_for_job_slot', 'waiting_for_gpu', 'waiting_for_mobilesam', 'waiting_for_vlm', 'retry_wait', 'recovering', 'paused'].includes(file.status))?.jobId
         ?? status.acceptedFiles.find((file) => file.status === 'queued')?.jobId
         ?? status.acceptedFiles.find((file) => file.status === 'completed')?.jobId
         ?? media?.selectedJobId
@@ -944,12 +1086,13 @@ function App() {
         ?? ''
       );
       const representativeJobId = isJobId(representativeJobIdCandidate) ? representativeJobIdCandidate : '';
+      const batchIsActive = ACTIVE_BACKEND_JOB_STATUSES.includes(status.status);
       const progressStatus: JobStatus = {
         jobId: representativeJobId,
-        status: status.status === 'running' ? 'running' : status.status === 'queued' ? 'queued' : 'completed',
+        status: batchIsActive ? 'running' : status.status === 'queued' || status.status === 'paused' ? 'queued' : 'completed',
         progress: completedJobs / totalJobs,
         progressPercent: Math.round((completedJobs / totalJobs) * 100),
-        stage: status.status === 'running' ? 'analyzing' : status.status,
+        stage: batchIsActive ? 'analyzing' : status.status,
         message: `Batch analysis ${status.status}`,
         currentStep: `Batch analysis ${status.status}`,
         error: status.status === 'failed' ? 'No videos completed successfully.' : null,
@@ -959,7 +1102,7 @@ function App() {
         setJobStatus(progressStatus);
       }
       if (media) {
-        updateMediaStatus(media.id, status.status === 'queued' ? 'queued' : status.status === 'running' ? 'processing' : 'completed');
+        updateMediaStatus(media.id, status.status === 'queued' || status.status === 'paused' ? 'queued' : batchIsActive ? 'processing' : 'completed');
         rememberCachedEntry(buildCacheEntry({
           media,
           batchStatus: status,
@@ -968,7 +1111,7 @@ function App() {
         }));
       }
 
-      if (status.status === 'completed' || status.status === 'partial') return status;
+      if (status.status === 'completed' || status.status === 'completed_with_failures' || status.status === 'partial') return status;
       if (status.status === 'failed' || status.status === 'cancelled') {
         throw new Error('Batch analysis could not be completed.');
       }
@@ -981,6 +1124,7 @@ function App() {
   }
 
   async function handleAnalyze() {
+    cancelPendingResultRequest();
     const requestedQuery = query.trim() || settings.useCaseProfile.defaultQuery;
     const profileConflict = getProfileQueryConflict(settings.useCaseProfile, requestedQuery);
     if (profileConflict) {
@@ -1074,6 +1218,8 @@ function App() {
             vlmEnabled: shouldRequestVlm(settings),
             device: settings.deviceMode,
             useCaseProfile: profileForRequest,
+            reviewMode: settings.reviewMode,
+            importKey: activeMedia ? `${activeMedia.id}:${effectiveQuery}:${settings.reviewMode}` : undefined,
           });
           if (!activeMedia || selectedMediaIdRef.current === activeMedia.id) setBatchStatus(batch);
           if (activeMedia) updateMediaJobReference(activeMedia.id, { batchId: batch.batchId });
@@ -1116,21 +1262,17 @@ function App() {
               media: activeMedia,
               result,
               batchStatus: finalBatch,
-              selectedJobId: completedFile.jobId,
               status: finalBatch.status,
               queryText: effectiveQuery,
             }));
             updateMediaJobReference(activeMedia.id, {
               batchId: finalBatch.batchId,
-              selectedJobId: completedFile.jobId,
-              jobId: completedFile.jobId,
             });
             updateMediaStatus(activeMedia.id, 'completed');
           }
           if (!activeMedia || selectedMediaIdRef.current === activeMedia.id) {
-            setSelectedBatchJobId(completedFile.jobId);
             setActiveStep(ANALYSIS_STEPS.length);
-            setAnalysisResult(result);
+            setAnalysisResult(null);
           }
           return;
         }
@@ -1145,6 +1287,7 @@ function App() {
           vlmEnabled: shouldRequestVlm(settings),
           device: settings.deviceMode,
           useCaseProfile: profileForRequest,
+          reviewMode: settings.reviewMode,
         });
         if (activeMedia) updateMediaJobReference(activeMedia.id, { jobId: job.jobId, selectedJobId: job.jobId });
         const queuedStatus: JobStatus = {
@@ -1179,11 +1322,14 @@ function App() {
             status: 'completed',
             queryText: effectiveQuery,
           }));
-          updateMediaStatus(activeMedia.id, 'completed');
+          updateMediaItem(activeMedia.id, {
+            status: 'completed',
+            ...queueRuntimePatchFromJob(result),
+          });
         }
         if (!activeMedia || selectedMediaIdRef.current === activeMedia.id) {
           setActiveStep(ANALYSIS_STEPS.length);
-          setAnalysisResult(result);
+          commitVisibleResult(result, job.jobId);
         }
         return;
       }
@@ -1203,7 +1349,7 @@ function App() {
         result.media.requestedQuery = requestedQuery;
         result.media.effectiveQuery = effectiveQuery;
         setActiveStep(ANALYSIS_STEPS.length);
-        setAnalysisResult(result);
+        commitVisibleResult(result, result.jobId);
         rememberCachedEntry(buildCacheEntry({
           media: selectedMedia,
           result,
@@ -1243,6 +1389,7 @@ function App() {
   }
 
   function handleReset() {
+    cancelPendingResultRequest();
     setAnalysisResult(null);
     setError(null);
     setErrorDetails(null);
@@ -1256,27 +1403,36 @@ function App() {
 
   async function handleSelectBatchResult(jobId: string) {
     if (batchResultLoadingJobId === jobId) return;
+    const request = resultRequestRef.current.begin(jobId);
+    const { controller } = request;
+    selectedBatchJobIdRef.current = jobId;
     setBatchResultLoadingJobId(jobId);
+    setResultRequestStateByJobId((current) => ({ ...current, [jobId]: 'loading' }));
     setError(null);
     setErrorDetails(null);
+    setSelectedBatchJobId(jobId);
+    setHighlightedFrameId(null);
     const cached = cachedEntries[jobCacheKey(jobId)];
-    if (cached?.result) {
-      setSelectedBatchJobId(jobId);
-      setAnalysisResult(cached.result);
-      setAnalysisMode(cached.source);
-      if (isCacheEntryStale(cached)) {
+    const keyedResult = resultByJobId[jobId];
+    if (keyedResult || cached?.result) {
+      commitVisibleResult(keyedResult ?? cached!.result!, jobId);
+      setAnalysisMode(cached?.source ?? 'backend');
+      if (cached && isCacheEntryStale(cached)) {
         setCacheMessage('Showing an older cached batch result while SafeTrace refreshes from the local runtime.');
       }
     }
     try {
-      const result = await getJobResult(jobId);
+      const result = await getJobResult(jobId, controller.signal);
+      if (
+        !resultRequestRef.current.isCurrent(request)
+        || selectedBatchJobIdRef.current !== jobId
+      ) return;
       const resultProfile = result.settings?.useCaseProfile ?? result.media.useCaseProfile ?? selectedMedia?.useCaseProfile ?? settings.useCaseProfile;
       result.settings = { ...settings, useCaseProfile: resultProfile };
       result.media.useCaseProfile = resultProfile;
       result.media.requestedQuery = selectedMedia?.requestedQuery ?? result.query;
       result.media.effectiveQuery = result.query;
-      setSelectedBatchJobId(jobId);
-      setAnalysisResult(result);
+      if (!commitVisibleResult(result, jobId)) return;
       setActiveStep(ANALYSIS_STEPS.length);
       if (selectedMedia) {
         rememberCachedEntry({
@@ -1309,14 +1465,30 @@ function App() {
         }));
       }
     } catch (err) {
+      if (!resultRequestRef.current.isCurrent(request)) return;
+      setResultRequestStateByJobId((current) => ({ ...current, [jobId]: 'error' }));
       if (!cached?.result) {
         setError(err instanceof Error ? err.message : 'Could not load this batch result.');
       } else {
         setCacheMessage('Showing cached batch result; the local runtime could not refresh it right now.');
       }
     } finally {
-      setBatchResultLoadingJobId(null);
+      if (resultRequestRef.current.isCurrent(request)) {
+        setBatchResultLoadingJobId(null);
+        resultRequestRef.current.complete(request);
+      }
     }
+  }
+
+  function handleBackToActiveBatch() {
+    cancelPendingResultRequest();
+    selectedBatchJobIdRef.current = null;
+    setSelectedBatchJobId(null);
+    setBatchResultLoadingJobId(null);
+    setAnalysisResult(null);
+    setHighlightedFrameId(null);
+    setError(null);
+    setErrorDetails(null);
   }
 
   async function deleteKnownBackendJobsForCacheEntries(entries: CachedResultEntry[]) {
@@ -1340,6 +1512,22 @@ function App() {
       }
     }
     return { deleted, failed, skipped, backendUnavailable: false };
+  }
+
+  async function handleRetryFailedBatch() {
+    if (!batchStatus) return;
+    await retryFailedBatchJobs(batchStatus.batchId);
+    setBatchStatus(await getBatchStatus(batchStatus.batchId));
+  }
+
+  async function handlePauseResumeBatch() {
+    if (!batchStatus) return;
+    if (batchStatus.status === 'paused') {
+      await resumeBatch(batchStatus.batchId);
+    } else {
+      await pauseBatch(batchStatus.batchId);
+    }
+    setBatchStatus(await getBatchStatus(batchStatus.batchId));
   }
 
   function backendDeletionMessage(result: Awaited<ReturnType<typeof deleteKnownBackendJobsForCacheEntries>>): string {
@@ -1515,6 +1703,17 @@ function App() {
         />
       ) : null}
 
+      {recoverySummary ? (
+        <RecoveryBanner
+          recovery={recoverySummary}
+          busy={recoveryBusy}
+          onContinue={(jobIds) => void handleRecoveryAction('continue', jobIds)}
+          onRestartFresh={(jobIds, purgeCompatibleCache) => void handleRecoveryAction('restartFresh', jobIds, purgeCompatibleCache)}
+          onDiscard={(jobIds) => void handleRecoveryAction('discard', jobIds)}
+          onLater={(jobIds) => void handleRecoveryAction('later', jobIds)}
+        />
+      ) : null}
+
       <ResultCachePanel
         entryCount={cachedEntryCount}
         message={cacheMessage}
@@ -1525,15 +1724,29 @@ function App() {
       />
 
       {activeView === 'insights' ? (
-        <SafetyInsightsDashboard
-          entries={Object.values(cachedEntries)}
-          currentResult={analysisResult}
-          backendConnected={backendConnected}
-          onOpenResult={handleOpenDashboardEntry}
-          onBackToAnalysis={() => setActiveView('analysis')}
+        <OperationsWorkspace
+          dashboard={dashboardSummary}
+          storage={storageSummary}
+          recovery={recoverySummary}
+          system={systemStatus}
+          onPreview={handleCleanupPreview}
+          onApply={handleCleanupApply}
+          evidence={<SafetyInsightsDashboard
+            entries={Object.values(cachedEntries)}
+            currentResult={analysisResult}
+            backendConnected={backendConnected}
+            onOpenResult={handleOpenDashboardEntry}
+            onBackToAnalysis={() => setActiveView('analysis')}
+          />}
         />
       ) : (
         <>
+      <AnalysisSetupPanel
+        settings={settings}
+        query={query}
+        onSettingsChange={handleSettingsChange}
+        onQueryChange={setQuery}
+      />
       <SelectedMediaViewer
         media={selectedMedia}
         disabled={controlsLocked}
@@ -1544,20 +1757,20 @@ function App() {
       />
 
       <QueryTabs
-        query={query}
         isLoading={isLoading}
         hasResult={Boolean(analysisResult)}
-        useCaseProfile={settings.useCaseProfile}
-        effectiveQuery={effectiveQueryPreview}
         queryConflict={queryConflict}
         buttonLabel={analyzeButtonLabel}
-        onQueryChange={setQuery}
         onAnalyze={handleAnalyze}
         onReset={handleReset}
         canAnalyze={canAnalyze}
         disabledReason={analyzeDisabledReason}
         previewMode={previewMode && !backendConnected}
       />
+
+      {(analysisResult?.analysisSetup ?? batchStatus?.analysisSetup ?? jobStatus?.analysisSetup) ? (
+        <AnalysisSetupSummary setup={(analysisResult?.analysisSetup ?? batchStatus?.analysisSetup ?? jobStatus?.analysisSetup)!} />
+      ) : null}
 
       {isLoading ? (
         <AnalysisProgress
@@ -1579,25 +1792,32 @@ function App() {
           elapsedSeconds={jobStatus?.elapsedSeconds}
           queueWaitSeconds={jobStatus?.queueWaitSeconds}
           analysisRuntimeSeconds={jobStatus?.analysisRuntimeSeconds}
+          stageElapsedSeconds={jobStatus?.stageElapsedSeconds}
           updatedAt={jobStatus?.updatedAt}
           heartbeatAt={jobStatus?.heartbeatAt}
         />
       ) : null}
       {batchStatus ? (
-        <BatchStatusPanel
-          batch={batchStatus}
-          selectedJobId={selectedBatchJobId}
-          loadingJobId={batchResultLoadingJobId}
-          onSelectJob={handleSelectBatchResult}
-        />
+        <div data-result-request-state={selectedBatchJobId ? resultRequestStateByJobId[selectedBatchJobId] ?? 'idle' : 'idle'}>
+          <BatchStatusPanel
+            batch={batchStatus}
+            selectedJobId={selectedBatchJobId}
+            loadingJobId={batchResultLoadingJobId}
+            onSelectJob={handleSelectBatchResult}
+            onRetryFailed={() => void handleRetryFailedBatch()}
+            onPauseResume={() => void handlePauseResumeBatch()}
+            onBackToBatch={handleBackToActiveBatch}
+          />
+        </div>
       ) : null}
       {error ? <ErrorState message={error} details={errorDetails || jobStatus?.error || backendMessage} /> : null}
+      {resultIntegrityWarning ? <ErrorState message="Result integrity check blocked foreign evidence." details={resultIntegrityWarning} /> : null}
 
       {!analysisResult && !isLoading && !error && (backendConnected || previewMode) ? (
         <PreAnalysisState hasMedia={Boolean(selectedFiles.length || selectedFile || canUsePreview)} previewMode={canUsePreview} />
       ) : null}
 
-      {analysisResult && !isLoading ? (
+      {analysisResult && (!isLoading || Boolean(selectedBatchJobId)) ? (
         <>
           <AnalysisSummary result={analysisResult} showExplanations={settings.visualExplanations} />
           
@@ -1624,6 +1844,8 @@ function App() {
             useCaseProfile={analysisResult.settings?.useCaseProfile ?? analysisResult.media.useCaseProfile}
             effectiveQuery={analysisResult.query}
             analysisDiagnostics={resultComponentDiagnostics(analysisResult)}
+            acceptedFindingCount={analysisResult.summary?.acceptedFindingCount ?? analysisResult.violations?.length ?? 0}
+            evidenceStatus={analysisResult.evidenceStatus ?? analysisResult.summary?.evidenceStatus}
           />
           
           {showAnnotation && (
@@ -1635,6 +1857,7 @@ function App() {
           )}
           
           <ReportActions result={analysisResult} />
+          <ResultLifecycleActions jobId={analysisResult.jobId} onDeleted={handleReset} />
         </>
       ) : null}
         </>
@@ -1741,19 +1964,71 @@ function BackendUnavailableState({
   );
 }
 
+function BatchHierarchyView({ node }: { node: BatchHierarchyNode }) {
+  return (
+    <div className="mt-2 border-l border-slate-200 pl-3">
+      {node.type === 'group' ? <p className="text-xs font-semibold text-slate-800">{node.name}</p> : null}
+      {node.files.map((file: BatchAcceptedFile) => (
+        <div key={file.jobId} className="mt-1 flex items-center justify-between gap-2 text-xs text-slate-600">
+          <span className="truncate">{file.filename}</span>
+          <span className="shrink-0 font-semibold uppercase">{file.status}</span>
+        </div>
+      ))}
+      {node.children.map((child) => (
+        <details key={child.path} className="mt-2" open>
+          <summary className="cursor-pointer text-xs font-semibold text-slate-800">{child.name}</summary>
+          <BatchHierarchyView node={child} />
+        </details>
+      ))}
+    </div>
+  );
+}
+
 function BatchStatusPanel({
   batch,
   selectedJobId,
   loadingJobId,
   onSelectJob,
+  onRetryFailed,
+  onPauseResume,
+  onBackToBatch,
 }: {
   batch: BatchStatus;
   selectedJobId: string | null;
   loadingJobId: string | null;
   onSelectJob: (jobId: string) => void;
+  onRetryFailed: () => void;
+  onPauseResume: () => void;
+  onBackToBatch: () => void;
 }) {
   const completed = batch.acceptedFiles.filter((file) => file.status === 'completed').length;
   const total = batch.acceptedFiles.length;
+  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState<'all' | 'active' | 'completed' | 'failed' | 'violations'>('all');
+  const throughput = batch.throughput || {};
+  const formatRuntime = (value: unknown) => {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds)) return 'pending';
+    const rounded = Math.max(0, Math.floor(seconds));
+    const minutes = Math.floor(rounded / 60);
+    return minutes ? `${minutes}m ${String(rounded % 60).padStart(2, '0')}s` : `${rounded}s`;
+  };
+  const filteredFiles = batch.acceptedFiles.filter((file) => {
+    const needle = search.trim().toLowerCase();
+    const matchesSearch = !needle || `${file.sourceRelativePath || file.filename} ${file.jobId}`.toLowerCase().includes(needle);
+    const matchesFilter = filter === 'all'
+      || (filter === 'active' && ['importing', 'queued', 'waiting_for_capacity', 'running', 'retry_wait', 'recovering', 'paused'].includes(file.status))
+      || (filter === 'violations' && Number(file.violationCount || 0) > 0)
+      || file.status === filter;
+    return matchesSearch && matchesFilter;
+  });
+  const schedulerDetail = (file: BatchAcceptedFile) => {
+    const details: string[] = [];
+    if (file.queuePosition) details.push(`Queue ${file.queuePosition}`);
+    if (file.workerSlot) details.push(`Worker ${file.workerSlot}`);
+    if (file.capacityReason) details.push(`Waiting for ${file.capacityReason.replace(/_/g, ' ')}`);
+    return details.join(' | ');
+  };
 
   return (
     <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-soft">
@@ -1770,9 +2045,77 @@ function BatchStatusPanel({
         </span>
       </div>
 
+      <div className="mt-4 flex flex-wrap gap-x-5 gap-y-1 border-y border-slate-200 py-3 text-xs text-slate-600">
+        <span title={String((throughput.metricDefinitions as Record<string, string> | undefined)?.batchRuntimeSeconds || '')}><strong className="text-slate-900">Batch elapsed:</strong> {formatRuntime(throughput.batchRuntimeSeconds)}</span>
+        <span title={String((throughput.metricDefinitions as Record<string, string> | undefined)?.meanChildRuntimeSeconds || '')}><strong className="text-slate-900">Mean processing:</strong> {formatRuntime(throughput.meanChildRuntimeSeconds)}</span>
+        <span><strong className="text-slate-900">Longest processing:</strong> {formatRuntime(throughput.longestChildRuntimeSeconds)}</span>
+        <span title={String((throughput.metricDefinitions as Record<string, string> | undefined)?.meanChildQueueWaitSeconds || '')}><strong className="text-slate-900">Mean queue wait:</strong> {formatRuntime(throughput.meanChildQueueWaitSeconds)}</span>
+        <span title={String((throughput.metricDefinitions as Record<string, string> | undefined)?.meanChildTotalElapsedSeconds || '')}><strong className="text-slate-900">Mean total elapsed:</strong> {formatRuntime(throughput.meanChildTotalElapsedSeconds)}</span>
+        {Number(throughput.cacheHitCount || 0) > 0 ? (
+          <span><strong className="text-slate-900">Cache hits:</strong> {String(throughput.cacheHitCount)} ({formatRuntime(throughput.meanCacheHitMaterializationSeconds)} mean materialization)</span>
+        ) : null}
+        {throughput.estimatedRemainingConfidence === 'sufficient' ? (
+          <span><strong className="text-slate-900">Estimated remaining:</strong> {formatRuntime(throughput.estimatedRemainingSeconds)}</span>
+        ) : (
+          <span>ETA pending enough completed jobs</span>
+        )}
+      </div>
+
+      {selectedJobId && completed < total ? (
+        <div className="mt-3 flex flex-col gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-950 sm:flex-row sm:items-center sm:justify-between">
+          <span>
+            <strong>Batch: {completed} of {total} completed - processing continues.</strong>{' '}
+            Viewing completed child: {batch.acceptedFiles.find((file) => file.jobId === selectedJobId)?.sourceRelativePath || selectedJobId}
+          </span>
+          <button type="button" className="focus-ring shrink-0 rounded border border-blue-300 bg-white px-3 py-1.5 text-xs font-semibold text-safety-blue" onClick={onBackToBatch}>
+            Back to active batch
+          </button>
+        </div>
+      ) : null}
+
+      <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <input
+          className="focus-ring min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm"
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search filename, path, or job ID"
+          aria-label="Search batch files"
+        />
+        <select
+          className="focus-ring rounded-lg border border-slate-300 px-3 py-2 text-sm"
+          value={filter}
+          onChange={(event) => setFilter(event.target.value as typeof filter)}
+          aria-label="Filter batch files"
+        >
+          <option value="all">All files</option>
+          <option value="active">Active</option>
+          <option value="completed">Completed</option>
+          <option value="failed">Failed</option>
+          <option value="violations">Has findings</option>
+        </select>
+        <button type="button" onClick={onPauseResume} className="focus-ring rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold">
+          {batch.status === 'paused' ? 'Resume batch' : 'Pause queued'}
+        </button>
+        {batch.acceptedFiles.some((file) => file.status === 'failed') ? (
+          <button type="button" onClick={onRetryFailed} className="focus-ring rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">
+            Retry failed only
+          </button>
+        ) : null}
+      </div>
+
+      {batch.groupSummaries?.length ? (
+        <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-600">
+          {batch.groupSummaries.map((summary) => (
+            <span key={String(summary.sourceGroupPath ?? 'ungrouped')} className="rounded border border-slate-200 bg-slate-50 px-2 py-1">
+              {String(summary.sourceGroupPath || 'Ungrouped')}: {String(summary.totalVideos || 0)} video(s)
+            </span>
+          ))}
+        </div>
+      ) : null}
+
       {batch.acceptedFiles.length ? (
         <div className="mt-4 grid gap-2">
-          {batch.acceptedFiles.map((file) => {
+          {filteredFiles.map((file) => {
             const isSelected = selectedJobId === file.jobId;
             const isLoading = loadingJobId === file.jobId;
 
@@ -1784,8 +2127,16 @@ function BatchStatusPanel({
                 }`}
               >
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-semibold text-slate-900">{file.filename}</p>
+                  <p className="truncate text-sm font-semibold text-slate-900">{file.sourceRelativePath || file.filename}</p>
+                  {file.sourceGroupPath ? <p className="truncate text-xs text-slate-500">Group: {file.sourceGroupPath}</p> : null}
                   <p className="text-xs text-slate-500">{formatFileSize(file.sizeBytes)}</p>
+                  <p className="mt-1 text-xs text-slate-600">
+                    {file.requestedModeLabel ? `Requested: ${file.requestedModeLabel}` : 'Requested: Fast Local Analysis'}
+                    {file.actualReview ? ` | Active review: ${file.actualReview}` : ''}
+                    {file.deviceLabel ? ` | Device: ${file.deviceLabel}` : ''}
+                  </p>
+                  {schedulerDetail(file) ? <p className="text-xs text-amber-700">{schedulerDetail(file)}</p> : null}
+                  {file.mobileSamStatus ? <p className="text-xs text-slate-500">MobileSAM: {file.mobileSamStatus}</p> : null}
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
                     <span className="font-semibold uppercase">Job</span>
                     <code className="rounded bg-white px-1.5 py-0.5 font-mono text-slate-800" title={file.jobId}>
@@ -1809,7 +2160,7 @@ function BatchStatusPanel({
                   ) : null}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  <span className="text-xs font-bold uppercase text-slate-600">{file.status}</span>
+                  <span className="text-xs font-bold uppercase text-slate-600">{file.status.replace(/_/g, ' ')}</span>
                   {file.status === 'completed' ? (
                     <button
                       type="button"
@@ -1829,6 +2180,13 @@ function BatchStatusPanel({
             );
           })}
         </div>
+      ) : null}
+
+      {batch.hierarchy?.children?.length ? (
+        <details className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <summary className="cursor-pointer text-xs font-bold uppercase text-slate-700">Folder hierarchy</summary>
+          <BatchHierarchyView node={batch.hierarchy} />
+        </details>
       ) : null}
 
       {batch.rejectedFiles.length ? (
@@ -1951,6 +2309,11 @@ function PreAnalysisState({ hasMedia, previewMode }: { hasMedia: boolean; previe
       </div>
     </section>
   );
+}
+
+function App() {
+  const validationMode = new URLSearchParams(window.location.search).get('validation') === '1';
+  return validationMode ? <ValidationDashboard /> : <SafeTraceApp />;
 }
 
 export default App;

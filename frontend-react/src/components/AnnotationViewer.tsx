@@ -289,6 +289,8 @@ export function AnnotationViewer({ mediaUrl, mediaId, mediaType = 'image' }: Ann
             ) : (
               <img
                 src={mediaUrl}
+                loading="lazy"
+                decoding="async"
                 alt="Media for annotation"
                 className="block max-h-96 w-full object-contain"
                 draggable={false}

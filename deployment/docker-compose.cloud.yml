@@ -1,0 +1,50 @@
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: deployment/backend/Dockerfile
+    environment:
+      PORT: "8000"
+      SAFETRACE_BUILD_MODE: SafeTrace_Cloud_FastLocal
+      SAFETRACE_RUNTIME_LAYOUT: cloud-container
+      SAFETRACE_PROJECT_ROOT: /app
+      SAFETRACE_DATA_DIR: /var/lib/safetrace/data
+      SAFETRACE_DEVICE: auto
+      SAFETRACE_ANALYSIS_SAFE_MODE: "true"
+      SAFETRACE_ANALYSIS_CONCURRENCY: "1"
+      SAFETRACE_WORKER_CONCURRENCY: "1"
+      SAFETRACE_VLM_ENABLED: "0"
+      SAFETRACE_ENABLE_VLM: "0"
+      SAFETRACE_LIGHTWEIGHT_VLM_ENABLED: "0"
+      SAFETRACE_ENHANCED_VLM_ENABLED: "0"
+      SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED: "0"
+      SAFETRACE_CHAT_ENABLED: "0"
+      SAFETRACE_MOBILESAM_ENABLED: "0"
+      SAFETRACE_MOBILESAM_WORKER_ENABLED: "0"
+      SAFETRACE_ALLOWED_ORIGINS: ${SAFETRACE_ALLOWED_ORIGINS:-}
+      SAFETRACE_INCLUDE_LOCAL_CORS_ORIGINS: "false"
+    ports:
+      - "${SAFETRACE_BACKEND_PORT:-8000}:8000"
+    volumes:
+      - safetrace_cloud_data:/var/lib/safetrace/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deployment/frontend/Dockerfile
+      args:
+        VITE_SAFETRACE_API_BASE_URL: ${VITE_SAFETRACE_API_BASE_URL:-}
+    ports:
+      - "${SAFETRACE_FRONTEND_PORT:-8080}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  safetrace_cloud_data:

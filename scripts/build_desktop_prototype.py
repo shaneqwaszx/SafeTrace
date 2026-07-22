@@ -18,7 +18,10 @@ from typing import Iterable
 
 PACKAGE_DIRNAME = "SafeTrace"
 DEFAULT_BACKEND_EXE = Path("dist") / "backend" / "safetrace-backend.exe"
+DEFAULT_BACKEND_ONEDIR = Path("dist") / "backend" / "safetrace-backend"
 PACKAGED_BACKEND_EXE = Path("backend") / "safetrace-backend.exe"
+PACKAGED_BACKEND_ONEDIR = Path("backend") / "safetrace-backend"
+PACKAGED_BACKEND_ONEDIR_EXE = PACKAGED_BACKEND_ONEDIR / "safetrace-backend.exe"
 EMBEDDING_MODEL_SOURCE = Path("checkpoints") / "siglip-base-patch16-224"
 EMBEDDING_MODEL_PACKAGE_PATH = Path("checkpoints") / "siglip-base-patch16-224"
 FALLBACK_DETECTOR_SOURCE = Path("checkpoints") / "yolov8s-seg.pt"
@@ -68,6 +71,7 @@ PROTECTED_ASSET_RULES = [
     "!dist/SafeTrace/models/chat/*.gguf",
     "!dist/SafeTrace/models/vlm/lightweight-256m/**",
     "!dist/SafeTrace/models/vlm/lightweight-512m/**",
+    "!dist/SafeTrace/models/vlm/enhanced-2b/**",
     "!dist/SafeTrace/models/vlm/enhanced-3b/**",
 ]
 PACKAGE_ASSET_ALLOWLIST = [
@@ -78,6 +82,7 @@ PACKAGE_ASSET_ALLOWLIST = [
     "dist/SafeTrace/models/chat/*.gguf",
     "dist/SafeTrace/models/vlm/lightweight-256m/**",
     "dist/SafeTrace/models/vlm/lightweight-512m/**",
+    "dist/SafeTrace/models/vlm/enhanced-2b/**",
     "dist/SafeTrace/models/vlm/enhanced-3b/**",
 ]
 PRESERVE_PATHS = ["config/", "data/", "models/", "logs/", "checkpoints/"]
@@ -107,6 +112,9 @@ PACKAGE_ENV_DEFAULTS = {
     "SAFETRACE_VLM_LIGHTWEIGHT_512M_MODEL_PATH": "models/vlm/lightweight-512m",
     "SAFETRACE_VLM_ENHANCED_MODEL_PATH": "models/vlm/enhanced-2b",
     "SAFETRACE_VLM_ENHANCED_3B_MODEL_PATH": "models/vlm/enhanced-3b",
+    "SAFETRACE_LIGHTWEIGHT_VLM_DEVICE": "auto",
+    "SAFETRACE_ENHANCED_VLM_DEVICE": "cuda",
+    "SAFETRACE_MOBILESAM_DEVICE": "auto",
     "SAFETRACE_VLM_OLLAMA_BASE_URL": "http://127.0.0.1:11434",
     "SAFETRACE_VLM_MODEL": "local-vlm",
     "SAFETRACE_VLM_TIMEOUT_SECONDS": "10",
@@ -131,6 +139,7 @@ PACKAGE_ENV_DEFAULTS = {
         "https://safetrace-iota.vercel.app,http://127.0.0.1:5173,http://localhost:5173"
     ),
 }
+GPU_VLM_RELEASE_PROFILE_NAME = "SafeTrace_RC_GPUVLM_Experimental"
 PACKAGE_RELEASE_PROFILES = {
     MAIN_RELEASE_PROFILE_NAME: {
         "description": "CPU Safe Mode release candidate with rule-based explanations, improved object/rule frame ranking, optional packaged assets disabled by default, and packaged chatbot enabled.",
@@ -307,6 +316,63 @@ PACKAGE_RELEASE_PROFILES = {
             "Do not include enhanced-3b or the legacy enhanced profile in this package.",
         ],
     },
+    GPU_VLM_RELEASE_PROFILE_NAME: {
+        "description": "Experimental GPU/VLM package with rule-based base analysis, MobileSAM worker refinement, lightweight 256M/512M VLM layers, enhanced 2B GPU layer, and packaged chatbot.",
+        "env": {
+            "SAFETRACE_ANALYSIS_SAFE_MODE": "true",
+            "SAFETRACE_SAFE_MODE_ALLOW_MOBILESAM": "true",
+            "SAFETRACE_DEVICE": "auto",
+            "SAFETRACE_ENABLE_GPU_AUTO": "true",
+            "SAFETRACE_GPU_AUTO": "1",
+            "SAFETRACE_MOBILESAM_ENABLED": "true",
+            "SAFETRACE_MOBILESAM_CHECKPOINT": "checkpoints/mobile_sam.pt",
+            "SAFETRACE_MOBILESAM_WORKER_ENABLED": "true",
+            "SAFETRACE_MOBILESAM_WORKER_TIMEOUT_SECONDS": "60",
+            "SAFETRACE_MOBILESAM_DEVICE": "auto",
+            "SAFETRACE_ENABLE_VLM": "true",
+            "SAFETRACE_VLM_ENABLED": "true",
+            "SAFETRACE_LIGHTWEIGHT_VLM_ENABLED": "1",
+            "SAFETRACE_ENHANCED_VLM_ENABLED": "1",
+            "SAFETRACE_VLM_PROVIDER": "auto",
+            "SAFETRACE_VLM_PROFILE": "enhanced_2b",
+            "SAFETRACE_VLM_DEVICE": "auto",
+            "SAFETRACE_VLM_MODEL_PATH": "models/vlm",
+            "SAFETRACE_VLM_DIR": "models/vlm",
+            "SAFETRACE_VLM_LIGHTWEIGHT_MODEL_PATH": "models/vlm/lightweight-256m",
+            "SAFETRACE_VLM_LIGHTWEIGHT_512M_MODEL_PATH": "models/vlm/lightweight-512m",
+            "SAFETRACE_VLM_ENHANCED_MODEL_PATH": "models/vlm/enhanced-2b",
+            "SAFETRACE_LIGHTWEIGHT_VLM_PRIMARY": "auto",
+            "SAFETRACE_LIGHTWEIGHT_VLM_FALLBACK": "256m",
+            "SAFETRACE_LIGHTWEIGHT_VLM_CPU_PREFER_256M": "true",
+            "SAFETRACE_LIGHTWEIGHT_VLM_DEVICE": "auto",
+            "SAFETRACE_ENHANCED_VLM_DEVICE": "cuda",
+            "SAFETRACE_LIGHTWEIGHT_VLM_TIMEOUT_SECONDS": "120",
+            "SAFETRACE_LIGHTWEIGHT_VLM_TOTAL_BUDGET_SECONDS": "0",
+            "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED": "true",
+            "SAFETRACE_LIGHTWEIGHT_VLM_WORKER_TIMEOUT_SECONDS": "120",
+            "SAFETRACE_VLM_TIMEOUT_SECONDS": "120",
+            "SAFETRACE_VLM_FRAME_LIMIT": "5",
+            "SAFETRACE_VLM_MAX_FRAMES": "5",
+            "SAFETRACE_VLM_MAX_EVIDENCE_FRAMES": "5",
+            "SAFETRACE_VLM_JOB_TIMEOUT_SECONDS": "0",
+            "SAFETRACE_VLM_MAX_QUALITY_FAILURES": "2",
+            "SAFETRACE_VLM_MAX_TOKENS": "48",
+            "SAFETRACE_VLM_CONCURRENCY": "1",
+            "SAFETRACE_ANALYSIS_CONCURRENCY": "1",
+            "SAFETRACE_CHAT_ENABLED": "1",
+            "SAFETRACE_CHAT_PROVIDER": "packaged_llamacpp",
+            "SAFETRACE_BUILD_MODE": GPU_VLM_RELEASE_PROFILE_NAME,
+            "SAFETRACE_RUNTIME_LAYOUT": "packaged-gpu-vlm-experimental",
+            "SAFETRACE_PACKAGE_VLM_PROFILES": "lightweight-256m,lightweight-512m,enhanced-2b",
+        },
+        "notes": [
+            "Experimental/internal tester package; larger than stable K-2.",
+            "Rule-based Fast Local Analysis remains the base engine.",
+            "Local VLM Assist uses packaged lightweight 512M/256M layers.",
+            "Advanced GPU VLM Assist uses packaged enhanced-2b only when CUDA is available.",
+            "VLM failures must fall back to the rule-based result.",
+        ],
+    },
     "SafeTrace_Internal_Enhanced3B_VLM_Experimental": {
         "description": "Internal enhanced VLM replacement candidate profile. Rule-based fallback remains active and only the 3B enhanced tier should be included.",
         "env": {
@@ -373,7 +439,8 @@ for %%I in ("%APP_ROOT%.") do set "APP_ROOT=%%~fI"
 cd /d "%APP_ROOT%" || exit /b 1
 if not exist "logs" mkdir "logs"
 
-set "BACKEND_EXE=backend\safetrace-backend.exe"
+set "BACKEND_EXE=backend\safetrace-backend\safetrace-backend.exe"
+if not exist "%BACKEND_EXE%" set "BACKEND_EXE=backend\safetrace-backend.exe"
 set "BACKEND_URL=http://127.0.0.1:8000/api/health"
 set "BACKEND_STDOUT=logs\backend_launcher_stdout.log"
 set "BACKEND_STDERR=logs\backend_launcher_stderr.log"
@@ -684,7 +751,8 @@ def manifest_payload(*, release_profile: str = MAIN_RELEASE_PROFILE_NAME) -> dic
         "schema_version": 2,
         "release_runtime_layout": {
             "launcher": "SafeTrace.exe or SafeTraceLauncher.exe",
-            "backend": "backend/safetrace-backend.exe",
+            "backend": str(PACKAGED_BACKEND_ONEDIR_EXE).replace("\\", "/"),
+            "legacyBackend": str(PACKAGED_BACKEND_EXE).replace("\\", "/"),
             "embeddingModel": "checkpoints/siglip-base-patch16-224/",
             "fallbackDetector": "checkpoints/yolov8s-seg.pt",
             "primaryDetector": "checkpoints/yolov9c-seg.pt",
@@ -702,7 +770,8 @@ def manifest_payload(*, release_profile: str = MAIN_RELEASE_PROFILE_NAME) -> dic
         },
         "backend": {
             "layout": "backend/",
-            "entrypoint": "safetrace-backend.exe",
+            "entrypoint": str(Path("safetrace-backend") / "safetrace-backend.exe").replace("\\", "/"),
+            "legacyEntrypoint": "safetrace-backend.exe",
             "manifest": "backend/backend_manifest.json",
         },
         "packaged_assets": {
@@ -742,7 +811,8 @@ def backend_manifest_payload() -> dict:
         "build_mode": "release-package-prototype",
         "requires_frontend_version": ">=0.0.0",
         "schema_version": 1,
-        "entrypoint": "safetrace-backend.exe",
+        "entrypoint": str(Path("safetrace-backend") / "safetrace-backend.exe").replace("\\", "/"),
+        "legacy_entrypoint": "safetrace-backend.exe",
         "external_assets": {
             "config": "config/safetrace.env",
             "data": "data/",
@@ -842,9 +912,50 @@ def vlm_asset_package_dir_for_values(values: dict[str, str]) -> Path:
     return VLM_PACKAGE_DIR / source.name
 
 
+def vlm_asset_sources_for_values(values: dict[str, str]) -> list[Path]:
+    raw_profiles = values.get("SAFETRACE_PACKAGE_VLM_PROFILES", "").strip()
+    if not raw_profiles:
+        return [vlm_asset_source_for_values(values)]
+    mapping = {
+        "lightweight_256m": VLM_LIGHTWEIGHT_SOURCE_DIR,
+        "lightweight-256m": VLM_LIGHTWEIGHT_SOURCE_DIR,
+        "256m": VLM_LIGHTWEIGHT_SOURCE_DIR,
+        "lightweight_512m": VLM_LIGHTWEIGHT_512M_SOURCE_DIR,
+        "lightweight-512m": VLM_LIGHTWEIGHT_512M_SOURCE_DIR,
+        "512m": VLM_LIGHTWEIGHT_512M_SOURCE_DIR,
+        "enhanced_2b": VLM_SOURCE_DIR / VLM_ENHANCED_PROFILE,
+        "enhanced-2b": VLM_SOURCE_DIR / VLM_ENHANCED_PROFILE,
+        "2b": VLM_SOURCE_DIR / VLM_ENHANCED_PROFILE,
+        "enhanced_3b": VLM_SOURCE_DIR / VLM_ENHANCED_3B_PROFILE,
+        "enhanced-3b": VLM_SOURCE_DIR / VLM_ENHANCED_3B_PROFILE,
+        "3b": VLM_SOURCE_DIR / VLM_ENHANCED_3B_PROFILE,
+    }
+    sources: list[Path] = []
+    for item in raw_profiles.split(","):
+        key = item.strip().lower()
+        if not key:
+            continue
+        source = mapping.get(key)
+        if source is None:
+            raise ValueError(f"Unknown package VLM profile: {item}")
+        if source not in sources:
+            sources.append(source)
+    return sources or [vlm_asset_source_for_values(values)]
+
+
 def source_backend_exe(repo_root: Path, backend_exe: Path | None = None) -> Path:
-    source = backend_exe or repo_root / DEFAULT_BACKEND_EXE
+    source = backend_exe or (
+        repo_root / DEFAULT_BACKEND_ONEDIR
+        if (repo_root / DEFAULT_BACKEND_ONEDIR / "safetrace-backend.exe").is_file()
+        else repo_root / DEFAULT_BACKEND_EXE
+    )
     return source if source.is_absolute() else repo_root / source
+
+
+def backend_runtime_executable(path: Path) -> Path:
+    if path.is_dir():
+        return path / "safetrace-backend.exe"
+    return path
 
 
 def chat_model_sources(repo_root: Path) -> list[Path]:
@@ -862,7 +973,7 @@ def strict_asset_failures(
 ) -> list[str]:
     values = release_config_values(repo_root, release_profile=release_profile)
     failures: list[str] = []
-    if not source_backend_exe(repo_root, backend_exe).is_file():
+    if not backend_runtime_executable(source_backend_exe(repo_root, backend_exe)).is_file():
         failures.append(f"Backend executable missing at {DEFAULT_BACKEND_EXE}.")
     if not (repo_root / CONFIG_SOURCE).is_file():
         failures.append("Release config missing at config/safetrace.env.")
@@ -875,9 +986,9 @@ def strict_asset_failures(
     if release_chat_expected(values) and not chat_model_sources(repo_root):
         failures.append("Packaged chat model missing under models/chat/*.gguf.")
     if release_vlm_expected(values):
-        vlm_source = vlm_asset_source_for_values(values)
-        if not path_has_contents(repo_root / vlm_source):
-            failures.append(f"Selected VLM assets missing under {vlm_source.as_posix()}/.")
+        for vlm_source in vlm_asset_sources_for_values(values):
+            if not path_has_contents(repo_root / vlm_source):
+                failures.append(f"Selected VLM assets missing under {vlm_source.as_posix()}/.")
     return failures
 
 
@@ -978,28 +1089,39 @@ def copy_backend_exe_if_exists(
     backend_exe: Path | None = None,
 ) -> bool:
     source = source_backend_exe(repo_root, backend_exe)
-    target = package / PACKAGED_BACKEND_EXE
-    if not source.is_file():
+    source_exe = backend_runtime_executable(source)
+    target = package / (PACKAGED_BACKEND_ONEDIR if source.is_dir() else PACKAGED_BACKEND_EXE)
+    target_exe = package / (PACKAGED_BACKEND_ONEDIR_EXE if source.is_dir() else PACKAGED_BACKEND_EXE)
+    if not source_exe.is_file():
         add_asset_report(
             report,
             name="backend executable",
             source=source,
-            target=target,
+            target=target_exe,
             status="missing",
             required_in_strict=True,
             message="Backend executable missing; package contains backend placeholder.",
         )
         return False
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, target)
+    if source.is_dir():
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(source, target)
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
     add_asset_report(
         report,
-        name="backend executable",
+        name="backend runtime",
         source=source,
-        target=target,
+        target=target_exe,
         status="included",
         required_in_strict=True,
-        message="Backend executable copied.",
+        message=(
+            "Backend one-dir runtime copied."
+            if source.is_dir()
+            else "Backend one-file executable copied."
+        ),
     )
     return True
 
@@ -1176,52 +1298,70 @@ def copy_vlm_assets(
         return summary
 
     selected_source = vlm_asset_source_for_values(values)
-    selected_package_dir = vlm_asset_package_dir_for_values(values)
-    source = repo_root / selected_source
-    target = package / selected_package_dir
-    if not path_has_contents(source):
-        write_text(vlm_root / "README.txt", VLM_README)
+    included_profiles: list[str] = []
+    missing_profiles: list[str] = []
+    for selected_source_for_package in vlm_asset_sources_for_values(values):
+        source = repo_root / selected_source_for_package
+        target = package / VLM_PACKAGE_DIR / selected_source_for_package.name
+        if not path_has_contents(source):
+            missing_profiles.append(selected_source_for_package.name)
+            add_asset_report(
+                report,
+                name=f"VLM assets ({selected_source_for_package.name})",
+                source=source,
+                target=target,
+                status="missing",
+                required_in_strict=False,
+                message=(
+                    f"Selected VLM assets missing for {selected_source_for_package.name}; "
+                    "rule-based fallback remains available."
+                ),
+            )
+            continue
+
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(
+            source,
+            target,
+            ignore=shutil.ignore_patterns(
+                ".git",
+                "__pycache__",
+                ".pytest_cache",
+                ".cache",
+                "data",
+                "uploads",
+                "generated",
+                "generated_media",
+            ),
+        )
+        included_profiles.append(selected_source_for_package.name)
         add_asset_report(
             report,
-            name="VLM assets",
+            name=f"VLM assets ({selected_source_for_package.name})",
             source=source,
             target=target,
-            status="missing",
+            status="included",
             required_in_strict=False,
-            message=f"Selected VLM assets missing for {values.get('SAFETRACE_VLM_PROFILE')}; rule-based fallback remains available.",
+            message=f"Copied selected VLM asset tier {selected_source_for_package.name}.",
         )
+
+    if not included_profiles:
+        write_text(vlm_root / "README.txt", VLM_README)
         return summary
 
-    if target.exists():
-        shutil.rmtree(target)
-    shutil.copytree(
-        source,
-        target,
-        ignore=shutil.ignore_patterns(
-            ".git",
-            "__pycache__",
-            ".pytest_cache",
-            ".cache",
-            "data",
-            "uploads",
-            "generated",
-            "generated_media",
-        ),
-    )
     add_asset_report(
         report,
         name="VLM assets",
-        source=source,
-        target=target,
+        source=repo_root / VLM_SOURCE_DIR,
+        target=package / VLM_PACKAGE_DIR,
         status="included",
         required_in_strict=False,
-        message=(
-            f"Copied selected VLM asset tier {values.get('SAFETRACE_VLM_PROFILE')}. "
-            "Other VLM tiers are not copied by this release profile."
-        ),
+        message=f"Copied selected VLM asset tiers: {', '.join(included_profiles)}.",
     )
-    summary["selected_vlm_assets_included"] = True
-    summary["included_vlm_profiles"] = [selected_source.name]
+    summary["selected_vlm_assets_included"] = selected_source.name in included_profiles
+    summary["included_vlm_profiles"] = included_profiles
+    summary["missing_vlm_profiles"] = missing_profiles
     return summary
 
 
@@ -1368,8 +1508,9 @@ def build_prototype(
     else:
         warnings.append("Packaged chat model missing; assistant remains structured but unavailable.")
     values = release_config_values(repo_root, release_profile=release_profile)
+    included_vlm_profiles = list(vlm_asset_summary.get("included_vlm_profiles", []))
     if selected_vlm_assets_included:
-        warnings.append(f"VLM assets included from {vlm_asset_source_for_values(values).as_posix()}/.")
+        warnings.append(f"VLM assets included: {', '.join(included_vlm_profiles)}.")
     elif release_vlm_expected(values):
         warnings.append("Selected VLM assets missing; visual explanations use rule-based fallback.")
     else:
@@ -1453,7 +1594,7 @@ def print_dry_run(
     failures = strict_asset_failures(repo_root, backend_exe, release_profile=release_profile)
     print(f"Would create SafeTrace desktop prototype at: {package}")
     print(f"Would use release profile: {release_profile}")
-    print(f"Would copy backend exe if present: {backend_source}")
+    print(f"Would copy backend runtime if present: {backend_source}")
     print(f"Would copy release config if present: {repo_root / CONFIG_SOURCE}")
     print(f"Would ensure packaged config defaults include: {', '.join(PACKAGE_ENV_DEFAULTS)}")
     print(f"Would copy embedding model if present: {repo_root / EMBEDDING_MODEL_SOURCE}")
@@ -1487,7 +1628,7 @@ def parse_args() -> argparse.Namespace:
         "--backend-exe",
         type=Path,
         default=None,
-        help="Optional path to an already-built safetrace-backend.exe to copy into the package",
+        help="Optional path to an already-built safetrace-backend.exe or one-dir safetrace-backend runtime folder",
     )
     parser.add_argument("--clean", action="store_true", help="Remove existing dist/SafeTrace before creating it")
     parser.add_argument("--dry-run", action="store_true", help="Print the planned package path and exclusions only")

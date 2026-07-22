@@ -56,6 +56,8 @@ class FrameAnalysis:
     explanation: Optional[str] = None
     explanation_source: Optional[str] = None
     annotated_path: Optional[str] = None
+    scene_applicability: Dict[str, Any] = field(default_factory=dict)
+    suppressed_findings: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -67,4 +69,6 @@ class FrameAnalysis:
             "explanation": self.explanation,
             "explanation_source": self.explanation_source,
             "annotated_path": self.annotated_path,
+            "scene_applicability": self.scene_applicability,
+            "suppressed_findings": self.suppressed_findings,
         }

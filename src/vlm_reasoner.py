@@ -154,8 +154,14 @@ VLM_SAFETY_EVIDENCE_KEYWORDS = (
     "worn",
     "not worn",
     "cannot determine",
+    "cannot confirm",
     "not visible",
+    "no clear",
+    "unclear",
     "occluded",
+    "glare",
+    "blur",
+    "camera angle",
 )
 VLM_GENERIC_INVENTORY_RE = re.compile(
     r"\b(?:some|several|various|many)\s+(?:objects?|items?|things?)\b|"
@@ -191,6 +197,21 @@ VLM_ARTIFACT_LEAK_RE = re.compile(
 VLM_FIELD_RE = re.compile(
     r"\b(visible_evidence|visual_status|short_reason|confidence_hint)\s*:\s*(.*?)(?=\b(?:visible_evidence|visual_status|short_reason|confidence_hint)\s*:|$)",
     re.IGNORECASE | re.DOTALL,
+)
+VLM_USEFUL_UNCERTAINTY_RE = re.compile(
+    r"\b(?:"
+    r"belt\s+path\s+(?:is\s+)?(?:not\s+visible|occluded|unclear|blocked|not\s+clear)|"
+    r"seat\s*belt\s+(?:is\s+)?(?:not\s+visible|occluded|unclear|blocked|not\s+clear)|"
+    r"cannot\s+(?:confirm|determine)\s+(?:a\s+)?(?:visible\s+)?(?:seat\s*belt|belt\s+path|belt\s+crossing)|"
+    r"no\s+clear\s+(?:seat\s*belt|belt\s+path|belt\s+crossing)|"
+    r"torso\s+(?:is\s+)?(?:occluded|blocked|not\s+visible|unclear)|"
+    r"(?:glare|blur|camera\s+angle|occlusion)\s+(?:prevents|limits|affects)\s+(?:confirmation|visibility)|"
+    r"head\s+(?:is\s+)?(?:not\s+visible|occluded|unclear)|"
+    r"helmet\s+(?:is\s+)?(?:not\s+visible|occluded|unclear)|"
+    r"phone\s+(?:is\s+)?(?:visible|near|not\s+visible|unclear)|"
+    r"active\s+use\s+(?:is\s+)?unclear"
+    r")\b",
+    re.IGNORECASE,
 )
 
 
@@ -301,6 +322,8 @@ def vlm_output_quality_issue(clean_text: str) -> str | None:
         return "too short"
     if any(phrase.lower() in text.lower() for phrase in VLM_PROMPT_ECHO_PHRASES):
         return "prompt echo"
+    if VLM_USEFUL_UNCERTAINTY_RE.search(text):
+        return None
     fields: dict[str, str] = {}
     for name, value in VLM_FIELD_RE.findall(text):
         cleaned_value = re.sub(
@@ -1079,6 +1102,44 @@ class VlmReasoner:
             self.last_fallback_reason = f"generation_error:{type(exc).__name__}"
             logger.warning("Local VLM generation failed (%s); using rule-based fallback.", exc)
         return _fallback_explanation(violations)
+
+    def generate_structured(
+        self,
+        image: np.ndarray,
+        prompt_text: str,
+        *,
+        max_new_tokens: int = 64,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        """Generate a bounded local-only structured response for a verifier."""
+        if not self.enabled or not self._loaded or self.provider != LOCAL_PROVIDER:
+            raise RuntimeError("structured_vlm_disabled_or_unloaded")
+
+        def generate_text() -> str:
+            import torch
+
+            pil = image if isinstance(image, Image.Image) else Image.fromarray(image)
+            inputs = self._inputs_to_device(self._processor_inputs_for_image(prompt_text, pil))
+            with torch.inference_mode():
+                output_ids = self._model.generate(
+                    **inputs,
+                    max_new_tokens=max(24, min(int(max_new_tokens), 96)),
+                    do_sample=False,
+                )
+            new_token_ids = self._generated_tokens_only(output_ids, inputs)
+            return self._processor.batch_decode(
+                new_token_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True,
+            )[0]
+
+        raw_text = _run_with_timeout(
+            generate_text,
+            float(timeout_seconds or SETTINGS.vlm_timeout_seconds),
+        )
+        self.last_raw_vlm_text = raw_text
+        self.last_clean_vlm_text = str(raw_text).strip()
+        return self.last_clean_vlm_text
 
 
 class RuleBasedReasoner:

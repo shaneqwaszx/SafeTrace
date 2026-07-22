@@ -16,6 +16,8 @@ type FrameEvidenceCardProps = {
   useCaseProfile?: UseCaseProfileSelection;
   effectiveQuery?: string;
   analysisDiagnostics?: Record<string, unknown> | null;
+  presentationNumber: number;
+  totalEvidence: number;
 };
 
 function mobileSamRefinement(frame: FrameResult): Record<string, unknown> | null {
@@ -123,6 +125,20 @@ function structuredVlmField(text: string | null | undefined, field: string): str
   return value || null;
 }
 
+function visualReviewFallbackLabel(reason: string | null | undefined): string {
+  const raw = (reason || '').toLowerCase();
+  if (!raw) return 'Local visual review did not add a confident result for this frame.';
+  if (raw.includes('timeout')) return 'Local visual review timed out; Fast Local Analysis fallback shown.';
+  if (raw.includes('generic object') || raw.includes('inventory')) return 'Local VLM output was rejected as unrelated object inventory.';
+  if (raw.includes('generic person')) return 'Local VLM output was rejected as unrelated person activity.';
+  if (raw.includes('prompt') || raw.includes('option-list')) return 'Local VLM output was rejected because it echoed the prompt.';
+  if (raw.includes('missing safety') || raw.includes('missing visible')) return 'Local VLM output did not answer the safety question clearly.';
+  if (raw.includes('not selected') || raw.includes('frame_limit') || raw.includes('frame limit')) return 'Local visual review was not run for this lower-priority frame.';
+  if (raw.includes('model_missing')) return 'Local visual review model was unavailable.';
+  if (raw.includes('disabled')) return 'Local visual review was disabled or not loaded.';
+  return `Local visual review fallback: ${reason}`;
+}
+
 function visualReviewText(vlmWorker: Record<string, unknown> | null, modeDiagnostics: ReturnType<typeof evidenceModeDiagnostics>) {
   const fallbackReason = metadataString(vlmWorker?.lightweightVlmFallbackReason) ?? modeDiagnostics.fallbackReason;
   const cleanPreview = metadataString(vlmWorker?.lightweightVlmCleanTextPreview)
@@ -148,7 +164,7 @@ function visualReviewText(vlmWorker: Record<string, unknown> | null, modeDiagnos
     return 'Local visual review timed out for this frame; Fast Local Analysis remains available.';
   }
   if (modeDiagnostics.workerAttempted) {
-    return 'Local visual review could not add a reliable explanation for this frame; Fast Local Analysis remains available.';
+    return `${visualReviewFallbackLabel(fallbackReason)} Fast Local Analysis remains available.`;
   }
   if (fallbackReason === 'visual_review_frame_limit_reached' || fallbackReason === 'local_visual_review_not_selected') {
     return 'Local visual review was not run for this lower-priority frame.';
@@ -212,10 +228,23 @@ function explanationSourceInfo(
     metadataString(vlmWorker?.lightweightVlmModelProfile),
   ].filter(Boolean).join(' ').toLowerCase();
   const wasVlmRequested = requested.includes('lightweight') || requested.includes('enhanced') || modeDiagnostics.workerAttempted;
+  const fallbackNote = visualReviewFallbackLabel(modeDiagnostics.fallbackReason);
+  if (modeDiagnostics.workerAttempted && requested.includes('enhanced')) {
+    return {
+      header: 'Advanced GPU VLM Assist attempted - Fast Local Analysis fallback',
+      note: fallbackNote,
+    };
+  }
+  if (modeDiagnostics.workerAttempted && (requested.includes('lightweight') || requested.includes('vlm'))) {
+    return {
+      header: 'Local VLM Assist attempted - Fast Local Analysis fallback',
+      note: fallbackNote,
+    };
+  }
   return {
     header: 'Fast Local Analysis explanation',
     note: wasVlmRequested
-      ? 'Local visual review did not add a confident result for this frame.'
+      ? fallbackNote
       : 'SafeTrace used local detector/rule evidence for this frame.',
   };
 }
@@ -228,6 +257,8 @@ export function FrameEvidenceCard({
   useCaseProfile,
   effectiveQuery,
   analysisDiagnostics,
+  presentationNumber,
+  totalEvidence,
 }: FrameEvidenceCardProps) {
   const displayedViolations = useCaseProfile
     ? frame.violations.filter((violation) => isViolationAlignedWithProfile(useCaseProfile, violation.name || violation.type))
@@ -266,8 +297,19 @@ export function FrameEvidenceCard({
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <h3 className="text-base font-bold text-slate-950">
-              Frame {frame.frameNumber} - {frame.timestamp}
+              Frame {presentationNumber} of {totalEvidence}
             </h3>
+            <p className="mt-1 text-xs font-semibold text-slate-600">
+              Source frame: {frame.sourceFrameIndex ?? 'not reported'} | Timestamp: {frame.timestampLabel || frame.timestamp}
+            </p>
+            {frame.sourceRelativePath || frame.videoFilename ? (
+              <p className="mt-1 text-xs text-slate-500">{frame.sourceRelativePath || frame.videoFilename}</p>
+            ) : null}
+            {frame.sourceGroup || frame.batchId || frame.jobId ? (
+              <p className="mt-1 text-xs text-slate-500">
+                {[frame.sourceGroup, frame.batchId, frame.jobId].filter(Boolean).join(' / ')}
+              </p>
+            ) : null}
             <p className="mt-1 text-sm text-slate-500">Query relevance: {formatQueryRelevance(frame.queryRelevance)}</p>
             {frame.selectionReason ? (
               <p className="mt-2 inline-flex rounded-lg border border-blue-100 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-900">

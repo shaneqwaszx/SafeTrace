@@ -1,12 +1,20 @@
 import json
 import os
 import sys
+import types
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 import src.api.server as server_module
-from scripts.build_backend_exe import BACKEND_EXE_NAME, DEFAULT_DIST_DIR, EXTERNAL_ASSET_RULES, build_command
+from scripts.build_backend_exe import (
+    BACKEND_EXE_NAME,
+    DEFAULT_DIST_DIR,
+    DEFAULT_ONEFILE_SPEC,
+    DEFAULT_ONEDIR_SPEC,
+    EXTERNAL_ASSET_RULES,
+    build_command,
+)
 from scripts.build_desktop_prototype import (
     DEFAULT_CHAT_MODEL_NAME,
     LAUNCHER_TEXT,
@@ -80,6 +88,7 @@ def test_release_profiles_prepare_safe_mode_main_and_optional_profiles():
         "SafeTrace_RC_MobileSAM_Worker_LightweightVLM_Worker_Experimental"
     ]
     lightweight_512m = PACKAGE_RELEASE_PROFILES["SafeTrace_RC_Lightweight512M_VLM_Experimental"]
+    gpu_vlm = PACKAGE_RELEASE_PROFILES["SafeTrace_RC_GPUVLM_Experimental"]
     enhanced_3b = PACKAGE_RELEASE_PROFILES["SafeTrace_Internal_Enhanced3B_VLM_Experimental"]
     full_lab = PACKAGE_RELEASE_PROFILES["SafeTrace_Internal_Lab_AllModels"]
 
@@ -148,6 +157,17 @@ def test_release_profiles_prepare_safe_mode_main_and_optional_profiles():
     assert lightweight_512m["env"]["SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED"] == "true"
     assert "Do not include enhanced-3b" in lightweight_512m["notes"][2]
 
+    assert gpu_vlm["env"]["SAFETRACE_DEVICE"] == "auto"
+    assert gpu_vlm["env"]["SAFETRACE_ENABLE_GPU_AUTO"] == "true"
+    assert gpu_vlm["env"]["SAFETRACE_MOBILESAM_ENABLED"] == "true"
+    assert gpu_vlm["env"]["SAFETRACE_MOBILESAM_WORKER_ENABLED"] == "true"
+    assert gpu_vlm["env"]["SAFETRACE_VLM_ENABLED"] == "true"
+    assert gpu_vlm["env"]["SAFETRACE_ENABLE_VLM"] == "true"
+    assert gpu_vlm["env"]["SAFETRACE_VLM_PROFILE"] == "enhanced_2b"
+    assert gpu_vlm["env"]["SAFETRACE_LIGHTWEIGHT_VLM_WORKER_ENABLED"] == "true"
+    assert gpu_vlm["env"]["SAFETRACE_PACKAGE_VLM_PROFILES"] == "lightweight-256m,lightweight-512m,enhanced-2b"
+    assert "Experimental/internal tester package" in gpu_vlm["notes"][0]
+
     assert enhanced_3b["env"]["SAFETRACE_VLM_ENABLED"] == "true"
     assert enhanced_3b["env"]["SAFETRACE_VLM_PROFILE"] == "enhanced_3b"
     assert enhanced_3b["env"]["SAFETRACE_VLM_MODEL_PATH"] == "models/vlm/enhanced-3b"
@@ -178,7 +198,8 @@ def test_desktop_manifest_example_shape():
     assert payload["release_runtime_layout"]["vlmAssets"] is None
     assert payload["frontend"]["dist_path"] == "frontend/dist"
     assert payload["frontend"]["live_frontend_supported"] is True
-    assert payload["backend"]["entrypoint"] == "safetrace-backend.exe"
+    assert payload["backend"]["entrypoint"] == "safetrace-backend/safetrace-backend.exe"
+    assert payload["backend"]["legacyEntrypoint"] == "safetrace-backend.exe"
     assert payload["packaged_assets"]["ollamaRequired"] is False
     assert payload["packaged_assets"]["embeddingModel"] == "checkpoints/siglip-base-patch16-224/"
     assert payload["packaged_assets"]["fallbackDetector"] == "checkpoints/yolov8s-seg.pt"
@@ -194,6 +215,7 @@ def test_desktop_manifest_example_shape():
     assert "dist/SafeTrace/checkpoints/yolov8s-seg.pt" in payload["package_asset_allowlist"]
     assert "dist/SafeTrace/models/vlm/lightweight-256m/**" in payload["package_asset_allowlist"]
     assert "dist/SafeTrace/models/vlm/lightweight-512m/**" in payload["package_asset_allowlist"]
+    assert "dist/SafeTrace/models/vlm/enhanced-2b/**" in payload["package_asset_allowlist"]
     assert "dist/SafeTrace/models/vlm/enhanced-3b/**" in payload["package_asset_allowlist"]
 
 
@@ -444,6 +466,38 @@ def test_package_script_copies_selected_lightweight_512m_assets_when_profile_ena
     )
 
 
+def test_package_script_copies_gpu_vlm_experimental_assets_when_profile_enabled(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for profile in ("lightweight-256m", "lightweight-512m", "enhanced-2b"):
+        model_dir = repo / "models" / "vlm" / profile
+        model_dir.mkdir(parents=True)
+        (model_dir / "config.json").write_text("{}", encoding="utf-8")
+        (model_dir / "model.safetensors").write_bytes(profile.encode("utf-8"))
+
+    summary = build_prototype(
+        repo,
+        tmp_path / "out",
+        clean=True,
+        release_profile="SafeTrace_RC_GPUVLM_Experimental",
+    )
+    package = Path(summary["package_root"])
+
+    assert summary["vlm_assets_included"] is False
+    assert summary["broad_vlm_assets_included"] is False
+    assert summary["selected_vlm_profile"] == "enhanced_2b"
+    assert summary["selected_vlm_assets_included"] is True
+    assert summary["included_vlm_profiles"] == ["lightweight-256m", "lightweight-512m", "enhanced-2b"]
+    assert (package / "models" / "vlm" / "lightweight-256m" / "config.json").is_file()
+    assert (package / "models" / "vlm" / "lightweight-512m" / "config.json").is_file()
+    assert (package / "models" / "vlm" / "enhanced-2b" / "config.json").is_file()
+    assert not (package / "models" / "vlm" / "enhanced-3b").exists()
+    env_content = (package / "config" / "safetrace.env").read_text(encoding="utf-8")
+    assert "SAFETRACE_DEVICE=auto" in env_content
+    assert "SAFETRACE_VLM_PROFILE=enhanced_2b" in env_content
+    assert "SAFETRACE_PACKAGE_VLM_PROFILES=lightweight-256m,lightweight-512m,enhanced-2b" in env_content
+
+
 def test_package_script_non_strict_allows_missing_release_assets(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -518,6 +572,26 @@ def test_package_script_strict_assets_passes_with_release_assets(tmp_path):
     assert not (package / "models" / "vlm" / "lightweight-256m").exists()
     assert not (package / "models" / "vlm" / "enhanced-2b").exists()
     assert (package / "OPTIONAL_ASSETS_REPORT.txt").is_file()
+
+
+def test_package_script_copies_onedir_backend_runtime(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    backend_dir = repo / DEFAULT_DIST_DIR / "safetrace-backend"
+    backend_dir.mkdir(parents=True)
+    (backend_dir / BACKEND_EXE_NAME).write_bytes(b"onedir exe")
+    (backend_dir / "_internal").mkdir()
+    (backend_dir / "_internal" / "runtime.dll").write_bytes(b"dll")
+
+    summary = build_prototype(repo, tmp_path / "out", clean=True)
+    package = Path(summary["package_root"])
+
+    assert summary["backend_exe_copied"] is True
+    assert (package / "backend" / "safetrace-backend" / BACKEND_EXE_NAME).read_bytes() == b"onedir exe"
+    assert (package / "backend" / "safetrace-backend" / "_internal" / "runtime.dll").read_bytes() == b"dll"
+    assert "backend\\safetrace-backend\\safetrace-backend.exe" in (
+        package / "SafeTraceLauncher.bat"
+    ).read_text(encoding="utf-8")
 
 
 def test_package_script_strict_assets_checks_selected_512m_candidate(tmp_path):
@@ -610,6 +684,18 @@ def test_backend_entrypoint_frozen_default_app_root_uses_package_parent(monkeypa
     assert backend_entrypoint.default_app_root() == tmp_path / "SafeTrace"
 
 
+def test_backend_entrypoint_frozen_default_app_root_uses_onedir_package_parent(monkeypatch, tmp_path):
+    from src.api import __main__ as backend_entrypoint
+
+    exe = tmp_path / "SafeTrace" / "backend" / "safetrace-backend" / "safetrace-backend.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"exe")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe))
+
+    assert backend_entrypoint.default_app_root() == tmp_path / "SafeTrace"
+
+
 def test_backend_entrypoint_packaged_defaults(monkeypatch, tmp_path):
     from src.api import __main__ as backend_entrypoint
 
@@ -691,6 +777,56 @@ def test_backend_entrypoint_packaged_defaults(monkeypatch, tmp_path):
     assert os.environ["SAFETRACE_RUNTIME_LAYOUT"] == "packaged"
 
 
+def test_backend_entrypoint_main_app_root_overrides_copied_relative_env(monkeypatch, tmp_path):
+    from src.api import __main__ as backend_entrypoint
+
+    env_file = tmp_path / "config" / "safetrace.env"
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text(
+        "\n".join(
+            [
+                "SAFETRACE_APP_ROOT=.",
+                "SAFETRACE_PROJECT_ROOT=C:/source/repo",
+                "SAFETRACE_VLM_MODEL_PATH=models/vlm",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    for key in ("SAFETRACE_APP_ROOT", "SAFETRACE_PROJECT_ROOT", "SAFETRACE_VLM_MODEL_PATH"):
+        monkeypatch.delenv(key, raising=False)
+
+    calls: list[dict] = []
+
+    def fake_run(app_ref, **kwargs):
+        calls.append({"app_ref": app_ref, **kwargs})
+
+    monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=fake_run))
+
+    assert backend_entrypoint.main(["--app-root", str(tmp_path), "--env-file", str(env_file), "--port", "8911"]) == 0
+    assert Path(os.environ["SAFETRACE_APP_ROOT"]) == tmp_path
+    assert Path(os.environ["SAFETRACE_PROJECT_ROOT"]) == tmp_path
+    assert os.environ["SAFETRACE_VLM_MODEL_PATH"] == "models/vlm"
+    assert calls and calls[0]["port"] == 8911
+
+
+def test_packaged_relative_paths_prefer_project_root_over_launch_cwd(monkeypatch, tmp_path):
+    from src.api import jobs as jobs_module
+
+    app_root = tmp_path / "package" / "SafeTrace"
+    source_root = tmp_path / "source"
+    packaged_vlm = app_root / "models" / "vlm"
+    source_vlm = source_root / "models" / "vlm"
+    packaged_vlm.mkdir(parents=True)
+    source_vlm.mkdir(parents=True)
+
+    monkeypatch.setattr(server_module.SETTINGS, "project_root", app_root)
+    monkeypatch.setattr(jobs_module.SETTINGS, "project_root", app_root)
+    monkeypatch.chdir(source_root)
+
+    assert server_module._resolve_configured_path(Path("models/vlm")) == packaged_vlm.resolve()
+    assert jobs_module.resolve_configured_path(Path("models/vlm")) == packaged_vlm.resolve()
+
+
 def test_packaged_launcher_has_foreground_mode_logs_and_health_check():
     assert "--foreground" in LAUNCHER_TEXT
     assert "--app-root \"%APP_ROOT%\"" in LAUNCHER_TEXT
@@ -742,7 +878,10 @@ def test_backend_exe_build_command_is_dry_run_friendly(tmp_path):
     assert command[:3] == [sys.executable, "-m", "PyInstaller"]
     assert "--distpath" in command
     assert str(tmp_path / "dist" / "backend") in command
-    assert str(tmp_path / "packaging" / "backend" / "safetrace_backend.spec") in command
+    assert str(tmp_path / DEFAULT_ONEDIR_SPEC) in command
+
+    onefile_command = build_command(tmp_path, mode="onefile")
+    assert str(tmp_path / DEFAULT_ONEFILE_SPEC) in onefile_command
 
 
 def test_backend_exe_plan_keeps_runtime_assets_external_and_llamacpp_hidden_import():
@@ -761,6 +900,11 @@ def test_backend_exe_plan_keeps_runtime_assets_external_and_llamacpp_hidden_impo
     assert '"src.lightweight_vlm_worker_client"' in spec
     assert '"src.mask_encoding"' in spec
     assert '"mobile_sam"' in spec
+    onedir_spec = Path("packaging/backend/safetrace_backend_onedir.spec").read_text(encoding="utf-8")
+    assert "COLLECT(" in onedir_spec
+    assert "exclude_binaries=True" in onedir_spec
+    assert 'collect_submodules("transformers.models.smolvlm")' in onedir_spec
+    assert '"transformers.models.smolvlm.video_processing_smolvlm"' in onedir_spec
 
 
 def test_backend_entrypoint_uses_freeze_support_for_pyinstaller_children():

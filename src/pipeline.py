@@ -23,9 +23,12 @@ from .config import SETTINGS
 from .device_gateway import device_gateway_payload, selected_component_device
 from .faiss_index import FaissIndex
 from .lightweight_vlm_worker_client import LightweightVlmWorkerReasoner
+from .mid_vlm_verifier import MidVlmSceneVerifier
 from .mobile_sam_segmenter import MobileSamSegmenter
 from .mobile_sam_worker_client import MobileSamWorkerSegmenter
+from .profile_composition import general_profile_registry_payload
 from .rule_engine import evaluate as evaluate_rules
+from .scene_applicability import apply_mid_vlm_verification, apply_scene_applicability_gate
 from .safe_frame_ranking import RankedFrameCandidate, parse_query_intent, score_frame_for_safe_mode, select_ranked_frames
 from .schemas import FrameAnalysis
 from .schemas import Violation
@@ -409,22 +412,35 @@ class SafeTracePipeline:
         vlm: Optional[VlmReasoner] = None,
         use_case_profile: Optional[Dict[str, Any]] = None,
         query_context: str = "",
+        workspace: Optional[Path] = None,
     ) -> None:
         self.use_case_profile: Dict[str, Any] = dict(use_case_profile or {})
         self.query_context = query_context
+        self.workspace = Path(workspace).resolve() if workspace is not None else None
+        self.frames_dir = self.workspace / "frames" if self.workspace is not None else SETTINGS.frames_dir
+        self.annotated_dir = self.workspace / "annotated" if self.workspace is not None else SETTINGS.data_dir / "annotated"
+        self.frames_dir.mkdir(parents=True, exist_ok=True)
+        self.annotated_dir.mkdir(parents=True, exist_ok=True)
         self.safe_mode = _analysis_safe_mode()
         safe_mode_mobile_sam_allowed = _safe_mode_allows_mobile_sam()
         mobile_sam_requested = _mobile_sam_runtime_requested()
         mobile_sam_worker_enabled = bool(mobile_sam_requested and _mobile_sam_worker_enabled())
         lightweight_vlm_worker_requested = _lightweight_vlm_worker_runtime_requested()
         vlm_enabled_mode = str(getattr(SETTINGS, "vlm_enabled", "auto") or "").strip().lower()
+        initial_device_gateway = device_gateway_payload(SETTINGS)
+        enhanced_device_available = bool(
+            initial_device_gateway.get("components", {}).get("enhancedVlm", {}).get("available")
+        )
         enhanced_vlm_worker_requested = bool(
             self.safe_mode
             and SETTINGS.enable_vlm
             and not _disabled_mode(vlm_enabled_mode)
             and _is_enhanced_vlm_profile(_configured_vlm_profile())
+            and enhanced_device_available
         )
         self._vlm_evidence_budget = _configured_vlm_evidence_budget()
+        self._mobile_sam_refinement_count = 0
+        self._mobile_sam_frame_limit = max(0, int(getattr(SETTINGS, "mobile_sam_frame_limit", 5)))
         self._vlm_job_time_budget_seconds = max(
             0.0,
             float(getattr(SETTINGS, "vlm_job_timeout_seconds", 60.0) or 0.0),
@@ -437,9 +453,28 @@ class SafeTracePipeline:
             int(getattr(SETTINGS, "vlm_max_quality_failures", 1) or 0),
         )
         self._last_lightweight_vlm_frame_diagnostics: Dict[str, Any] = {}
+        self._mid_vlm_attempt_count = 0
+        self._mid_vlm_max_frames = max(0, int(getattr(SETTINGS, "mid_vlm_max_frames", 2) or 0))
+        self.mid_vlm = MidVlmSceneVerifier()
+        self._frame_trace_metadata: Dict[str, Dict[str, Any]] = {}
+        device_gateway = initial_device_gateway
+        gateway_components = dict(device_gateway.get("components") or {})
+        detector_device = str(gateway_components.get("detector", {}).get("selected") or selected_component_device(SETTINGS, "detector"))
+        mobile_sam_device = str(gateway_components.get("mobileSam", {}).get("selected") or selected_component_device(SETTINGS, "mobileSam"))
+        lightweight_vlm_device = str(gateway_components.get("lightweightVlm", {}).get("selected") or selected_component_device(SETTINGS, "lightweightVlm"))
+        enhanced_vlm_device = str(gateway_components.get("enhancedVlm", {}).get("selected") or selected_component_device(SETTINGS, "enhancedVlm"))
         self.component_diagnostics: Dict = {
             "safeMode": self.safe_mode,
-            "device": selected_component_device(SETTINGS, "detector"),
+            "requestedDevice": str(getattr(SETTINGS, "device", "auto") or "auto"),
+            "device": detector_device,
+            "actualDetectorDevice": detector_device,
+            "actualMobileSamDevice": mobile_sam_device,
+            "actualLightweightVlmDevice": lightweight_vlm_device,
+            "actualEnhancedVlmDevice": enhanced_vlm_device,
+            "cudaAvailableAtJobStart": bool(device_gateway.get("torch", {}).get("cuda_available")),
+            "gpuName": device_gateway.get("torch", {}).get("gpu_name") or device_gateway.get("hardware", {}).get("gpu_name"),
+            "torchCudaMemoryBeforeMb": device_gateway.get("torch", {}).get("allocated_gpu_memory_mb"),
+            "mobileSamFrameLimit": self._mobile_sam_frame_limit,
             "requestedVisualExplanationMode": getattr(SETTINGS, "vlm_profile", "rule_based"),
             "effectiveExplanationMode": (
                 _configured_vlm_profile()
@@ -468,7 +503,7 @@ class SafeTracePipeline:
             "vlmLayeringMode": "rule_based_base_with_optional_vlm_verifier",
             "baseExplanationSource": "rule_based",
             "finalExplanationSource": "rule_based",
-            "deviceGatewayDecision": device_gateway_payload(SETTINGS),
+            "deviceGatewayDecision": device_gateway,
             "lightweightVlmVerifierRole": "visual_verifier_layer",
             "lightweightVlmContributionAccepted": False,
             "enhancedVlmLayerStatus": "unavailable",
@@ -490,6 +525,21 @@ class SafeTracePipeline:
             "vlmEvidenceBudget": self._vlm_evidence_budget,
             "vlmFrameLimit": self._vlm_evidence_budget,
             "vlmSkippedReasons": {},
+            "midVlmEnabled": bool(self.mid_vlm.enabled),
+            "midVlmModelPath": str(self.mid_vlm.model_dir),
+            "midVlmDevice": self.mid_vlm.device,
+            "midVlmConcurrency": min(1, int(getattr(SETTINGS, "mid_vlm_concurrency", 1) or 1)),
+            "midVlmMaxFrames": self._mid_vlm_max_frames,
+            "midVlmAttempts": 0,
+            "midVlmAccepted": 0,
+            "midVlmRecords": [],
+            "sceneApplicabilityRecords": [],
+            "generalProfileComposition": (
+                general_profile_registry_payload()
+                if str(self.use_case_profile.get("profileId") or "general_safety") == "general_safety"
+                else None
+            ),
+            "midVlmAuthoritative": False,
             "safeModeMobileSamAllowed": safe_mode_mobile_sam_allowed,
             "mobileSamRequested": mobile_sam_requested,
             "mobileSamAttempted": False,
@@ -511,6 +561,8 @@ class SafeTracePipeline:
             "stageTimings": {},
             "safeFrameRankingEnabled": self.safe_mode,
             "safeFrameRankingStrategy": "object_rule_temporal" if self.safe_mode else None,
+            "executionWorkspace": str(self.workspace) if self.workspace is not None else None,
+            "jobScopedArtifacts": self.workspace is not None,
         }
         self._stage_started_at: Optional[float] = None
         self._active_stage: Optional[str] = None
@@ -703,13 +755,15 @@ class SafeTracePipeline:
             )
             self._vlm_quality_failures += 1
             if self._vlm_max_quality_failures and self._vlm_quality_failures >= self._vlm_max_quality_failures:
-                self._vlm_disabled_reason = "local_visual_review_quality_guard"
+                self.component_diagnostics["lightweightVlmRuntimeGuardReason"] = "local_visual_review_quality_guard"
+                self.component_diagnostics["lightweightVlmQualityGuardReached"] = True
 
         if self._vlm_job_time_budget_seconds > 0 and self._remaining_vlm_job_time() <= 0:
             self._vlm_disabled_reason = self._vlm_disabled_reason or "local_visual_review_runtime_guard_elapsed"
 
         self.component_diagnostics["lightweightVlmDisabledReason"] = self._vlm_disabled_reason
-        self.component_diagnostics["lightweightVlmRuntimeGuardReason"] = self._vlm_disabled_reason
+        if self._vlm_disabled_reason:
+            self.component_diagnostics["lightweightVlmRuntimeGuardReason"] = self._vlm_disabled_reason
 
     def _lightweight_vlm_frame_diagnostics(
         self,
@@ -914,12 +968,17 @@ class SafeTracePipeline:
         return self.vlm.explain_violation(image, violations)
 
     def _refine_selected_safe_mode_frame(self, image, detections):
-        if not self.safe_mode or not _mobile_sam_runtime_requested() or not detections:
+        if not _mobile_sam_runtime_requested() or not detections:
             return detections
+        if self._mobile_sam_refinement_count >= self._mobile_sam_frame_limit:
+            self.component_diagnostics["mobileSamFrameLimitReached"] = True
+            return CoarseMaskSegmenter().refine(image, detections)
+        self._mobile_sam_refinement_count += 1
+        self.component_diagnostics["mobileSamFramesAttempted"] = self._mobile_sam_refinement_count
         self.component_diagnostics["mobileSamAttempted"] = True
         self._mark_stage("selected_mobilesam_refine")
         try:
-            segmenter = self._selected_frame_mobile_sam_segmenter()
+            segmenter = self._selected_frame_mobile_sam_segmenter() if self.safe_mode else self.segmenter
             if not bool(getattr(segmenter, "available", False)):
                 self.component_diagnostics["mobileSamLoaded"] = False
                 self._merge_mobile_sam_diagnostics(segmenter)
@@ -1025,7 +1084,7 @@ class SafeTracePipeline:
         for vid in videos:
             frames, metadata = extract_frames_with_metadata(
                 vid,
-                SETTINGS.frames_dir,
+                self.frames_dir,
                 fps=fps,
                 max_frames=max_frames,
                 max_duration_seconds=SETTINGS.max_video_duration_seconds,
@@ -1033,15 +1092,24 @@ class SafeTracePipeline:
             )
             all_frames.extend(frames)
             sampling_runs.append(metadata)
+            for sampled_frame in metadata.get("sampledFrames") or []:
+                sampled_path = sampled_frame.get("framePath")
+                if sampled_path:
+                    self._frame_trace_metadata[str(Path(sampled_path).resolve())] = dict(sampled_frame)
 
         # Copy/standardize image inputs into the frames folder so the corpus
         # has one canonical location.
         for img in images:
-            dst = SETTINGS.frames_dir / img.name
+            dst = self.frames_dir / img.name
             if str(dst.resolve()) != str(img.resolve()):
                 arr = imread_rgb(img)
                 imwrite_rgb(dst, arr)
             all_frames.append(dst)
+            self._frame_trace_metadata[str(dst.resolve())] = {
+                "framePath": str(dst),
+                "sourceFrameIndex": None,
+                "timestampSeconds": 0.0,
+            }
 
         return all_frames, sampling_runs, {"videos": len(videos), "images": len(images)}
 
@@ -1070,15 +1138,111 @@ class SafeTracePipeline:
 
         if precomputed:
             detections = list(precomputed.get("detections") or [])
-            violations = list(precomputed.get("violations") or [])
             detections = self._refine_selected_safe_mode_frame(image, detections)
+            # Re-evaluate after refinement so scene applicability never trusts
+            # stale candidates produced before MobileSAM or final detections.
+            violations = evaluate_rules(detections)
         else:
             self._mark_stage("detector_inference")
             detections = self.detector.detect(image)
             self._mark_stage("segmentation_refine")
-            detections = self.segmenter.refine(image, detections)
+            detections = self._refine_selected_safe_mode_frame(image, detections)
             self._mark_stage("rule_evaluation")
             violations = evaluate_rules(detections)
+
+        pre_gate_violations = list(violations)
+        violations, suppressed_findings, scene_applicability = apply_scene_applicability_gate(
+            detections,
+            violations,
+            profile_id=str(self.use_case_profile.get("profileId") or "general_safety"),
+        )
+        self.component_diagnostics["sceneApplicability"] = scene_applicability.to_payload()
+        self.component_diagnostics["sceneSuppressedFindings"] = list(suppressed_findings)
+
+        if violations and self.mid_vlm.enabled and self._mid_vlm_attempt_count < self._mid_vlm_max_frames:
+            verified: list[Violation] = []
+            profile_id = str(self.use_case_profile.get("profileId") or "general_safety")
+            for violation in violations:
+                if self._mid_vlm_attempt_count >= self._mid_vlm_max_frames:
+                    verified.append(violation)
+                    continue
+                self._mark_stage("mid_vlm_scene_verification")
+                self._mid_vlm_attempt_count += 1
+                response = self.mid_vlm.verify(
+                    image,
+                    finding=violation.name,
+                    profile=profile_id,
+                    query=self.query_context,
+                )
+                diagnostics = dict(self.mid_vlm.last_diagnostics)
+                diagnostics.update(
+                    {
+                        "finding": violation.name,
+                        "baselineApplicable": True,
+                        "attemptNumber": self._mid_vlm_attempt_count,
+                    }
+                )
+                self.component_diagnostics["midVlmAttempts"] = self._mid_vlm_attempt_count
+                if response is None:
+                    diagnostics["decision"] = "baseline_preserved_after_verifier_failure"
+                    verified.append(violation)
+                else:
+                    keep, reason = apply_mid_vlm_verification(
+                        violation,
+                        scene_applicability,
+                        response,
+                    )
+                    diagnostics["decision"] = reason
+                    if keep:
+                        verified.append(violation)
+                        self.component_diagnostics["midVlmAccepted"] = int(
+                            self.component_diagnostics.get("midVlmAccepted") or 0
+                        ) + 1
+                    else:
+                        suppressed_findings.append(
+                            {
+                                "name": violation.name,
+                                "confidence": float(violation.confidence),
+                                "reason": reason,
+                                "sceneApplicability": scene_applicability.to_payload(),
+                                "midVlmSceneVerification": response,
+                            }
+                        )
+                self.component_diagnostics["midVlmRecords"].append(diagnostics)
+            violations = verified
+            self.component_diagnostics["sceneSuppressedFindings"] = list(suppressed_findings)
+
+        scene_record = {
+            "framePath": str(frame_path),
+            "detectedLabels": list(scene_applicability.labels),
+            "scene": scene_applicability.to_payload(),
+            "preGateCandidates": [item.name for item in pre_gate_violations],
+            "preGateCandidateCount": len(pre_gate_violations),
+            "postGateCandidates": [item.name for item in violations],
+            "postGateCandidateCount": len(violations),
+            "suppressedFindings": list(suppressed_findings),
+        }
+        self._last_scene_applicability = scene_applicability.to_payload()
+        self._last_scene_suppressed_findings = list(suppressed_findings)
+        self._last_scene_record = scene_record
+        self.component_diagnostics["sceneApplicabilityRecords"].append(scene_record)
+        scene_records = self.component_diagnostics["sceneApplicabilityRecords"]
+        self.component_diagnostics["sceneApplicabilitySummary"] = {
+            "sampledRecordCount": len(scene_records),
+            "personVisibleFrameCount": sum(bool(item["scene"].get("personVisible")) for item in scene_records),
+            "vehicleInteriorVisibleFrameCount": sum(
+                bool(item["scene"].get("vehicleInteriorVisible")) for item in scene_records
+            ),
+            "applicableFrameCount": sum(bool(item["scene"].get("profileApplicable")) for item in scene_records),
+            "manualReviewFrameCount": sum(
+                bool(item["scene"].get("manualReviewRequired")) for item in scene_records
+            ),
+            "preGateCandidateCount": sum(int(item["preGateCandidateCount"]) for item in scene_records),
+            "postGateCandidateCount": sum(int(item["postGateCandidateCount"]) for item in scene_records),
+            "globallyInapplicable": not any(
+                bool(item["scene"].get("profileApplicable")) for item in scene_records
+            ),
+        }
 
         explanation: Optional[str] = None
         explanation_source: Optional[str] = None
@@ -1173,12 +1337,10 @@ class SafeTracePipeline:
             )
 
         annotated_path: Optional[str] = None
-        if detections:
+        if violations or bool(getattr(SETTINGS, "diagnostic_frames_enabled", False)):
             self._mark_stage("annotation_write")
             annotated = draw_overlays(image, detections)
-            ann_dir = SETTINGS.data_dir / "annotated"
-            ann_dir.mkdir(parents=True, exist_ok=True)
-            out_path = ann_dir / f"{frame_path.stem}_annotated.jpg"
+            out_path = self.annotated_dir / f"{frame_path.stem}_annotated.jpg"
             imwrite_rgb(out_path, annotated)
             annotated_path = str(out_path)
         self._finish_active_stage()
@@ -1192,6 +1354,8 @@ class SafeTracePipeline:
             explanation=explanation,
             explanation_source=explanation_source,
             annotated_path=annotated_path,
+            scene_applicability=scene_applicability.to_payload(),
+            suppressed_findings=suppressed_findings,
         )
 
     def analyze_query(self, query: str, k: int | None = None) -> List[Dict]:
@@ -1213,6 +1377,11 @@ class SafeTracePipeline:
         for hit in hits:
             fa = self.analyze_frame(hit["frame_path"], score=hit.get("score", 0.0))
             payload = fa.to_dict()
+            trace = self._frame_trace_metadata.get(str(Path(hit["frame_path"]).resolve()), {})
+            payload["source_frame_index"] = trace.get("sourceFrameIndex")
+            payload["timestamp_seconds"] = trace.get("timestampSeconds")
+            payload["scene_applicability"] = dict(getattr(self, "_last_scene_applicability", {}) or {})
+            payload["suppressed_findings"] = list(getattr(self, "_last_scene_suppressed_findings", []) or [])
             payload["search_metadata"] = {
                 key: value
                 for key, value in hit.items()
@@ -1310,6 +1479,11 @@ class SafeTracePipeline:
                 },
             )
             payload = fa.to_dict()
+            trace = self._frame_trace_metadata.get(str(candidate.frame_path.resolve()), {})
+            payload["source_frame_index"] = trace.get("sourceFrameIndex")
+            payload["timestamp_seconds"] = trace.get("timestampSeconds")
+            payload["scene_applicability"] = dict(getattr(self, "_last_scene_applicability", {}) or {})
+            payload["suppressed_findings"] = list(getattr(self, "_last_scene_suppressed_findings", []) or [])
             payload["search_metadata"] = candidate.search_metadata(rank=rank)
             payload["search_metadata"]["requestedVisualExplanationMode"] = self.component_diagnostics.get(
                 "requestedVisualExplanationMode"

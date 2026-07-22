@@ -152,6 +152,12 @@ def test_analyze_completes_with_monkeypatched_pipeline(monkeypatch, tmp_path):
     assert status["queueWaitSeconds"] >= 0
     assert status["analysisRuntimeSeconds"] >= 0
     assert status["heartbeatAt"] is None
+    assert status["requestedModeLabel"] == "Fast Local Analysis"
+    assert status["explanationOutcomeLabel"] == "Fast Local Analysis"
+    assert status["vlmAttempted"] is False
+    assert status["actualDeviceLabel"] in {"CPU", "CUDA", "Auto selected CUDA", "auto"}
+    assert status["engineRuntimeSummary"]["requestedMode"] == "Fast Local Analysis"
+    assert "runtime" in status["engineRuntimeSummary"]
     diagnostics = status["componentDiagnostics"]
     assert diagnostics["safeMode"] is False
     assert diagnostics["embeddingRequested"] is True
@@ -172,8 +178,9 @@ def test_analyze_completes_with_monkeypatched_pipeline(monkeypatch, tmp_path):
     assert result["summary"]["framesWithViolations"] == 1
     assert result["violations"][0]["name"] == "Missing Helmet"
     assert result["frames"][0]["imageUrl"].startswith(f"/api/media/{job_id}/")
-    assert result["frames"][1]["imageUrl"] is None
-    assert "No annotated evidence image" in result["frames"][1]["imageMessage"]
+    assert len(result["frames"]) == 1
+    assert result["evidence"] == result["frames"]
+    assert result["diagnosticFrames"] == []
     assert result["engineMetrics"]["schemaVersion"] == 1
     assert result["engineMetrics"]["counts"]["analyzedFrames"] == 2
     assert result["engineMetrics"]["counts"]["detections"] == 1
@@ -540,7 +547,7 @@ def test_analyze_hard_disabled_vlm_cannot_be_activated(monkeypatch, tmp_path):
     assert captured[0]["vlm_model_dir"] is None
 
 
-def test_safe_mode_suppresses_vlm_and_forces_cpu(monkeypatch, tmp_path):
+def test_safe_mode_suppresses_direct_vlm_but_respects_requested_device(monkeypatch, tmp_path):
     lightweight = tmp_path / "models" / "vlm" / "lightweight-256m"
     lightweight.mkdir(parents=True)
     (lightweight / "model.safetensors").write_bytes(b"placeholder")
@@ -552,7 +559,11 @@ def test_safe_mode_suppresses_vlm_and_forces_cpu(monkeypatch, tmp_path):
         diagnostics.update(
             {
                 "safeMode": True,
-                "device": "cpu",
+                "requestedDevice": kwargs["device"],
+                "device": kwargs["device"],
+                "actualDetectorDevice": kwargs["device"],
+                "actualLightweightVlmDevice": kwargs["device"],
+                "cudaAvailableAtJobStart": kwargs["device"] == "cuda",
                 "embeddingRequested": False,
                 "embeddingLoaded": False,
                 "vlmAttempted": False,
@@ -596,13 +607,15 @@ def test_safe_mode_suppresses_vlm_and_forces_cpu(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert captured
     assert captured[0]["safe_mode"] is True
-    assert captured[0]["device"] == "cpu"
+    assert captured[0]["device"] == "cuda"
     assert captured[0]["enable_vlm"] is False
     assert captured[0]["vlm_model_dir"] is None
     status = completed_status(client, response.json()["jobId"])
     diagnostics = status["componentDiagnostics"]
     assert diagnostics["safeMode"] is True
-    assert diagnostics["device"] == "cpu"
+    assert diagnostics["device"] == "cuda"
+    assert diagnostics["actualDetectorDevice"] == "cuda"
+    assert status["actualDeviceLabel"] == "CUDA"
     assert diagnostics["embeddingRequested"] is False
     assert diagnostics["vlmLoaded"] is False
     assert diagnostics["mobileSamLoaded"] is False

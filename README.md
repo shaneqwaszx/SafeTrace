@@ -6,6 +6,16 @@ with SigLIP + FAISS, detects objects with YOLOv9-seg + MobileSAM, applies
 a deterministic rule engine, and (optionally) generates natural-language
 explanations with a local VLM. Results are served through a Streamlit UI.
 
+## Full-local teammate start
+
+1. Checkout or pull the `integrate-frontend-backend` branch.
+2. Prepare the supported repository `.venv` and place the external model assets in the documented local paths. Model weights are not stored in Git.
+3. Run `START_SAFETRACE_LOCAL.bat` from the repository root, or run `scripts\start_safetrace_full_local.bat` directly.
+4. In another terminal, run `cd frontend-react`, `npm install`, and `npm run dev`.
+5. Open `http://127.0.0.1:5173`.
+
+The Windows launcher runs the strict `local_full` readiness preflight before starting the backend. It requires the configured CUDA, detector, MobileSAM, local assistant, and visual-explanation assets and does not silently fall back to CPU.
+
 ---
 
 ## Architecture

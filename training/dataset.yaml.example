@@ -1,0 +1,17 @@
+path: /path/to/safetrace-labelled-dataset
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: person
+  1: seatbelt
+  2: helmet
+  3: head
+  4: torso
+  5: hand
+  6: cell_phone
+  7: steering_wheel
+
+# Keep vehicle/camera sources isolated between train, val, and test.
+# Record dataset version, annotation policy, reviewer decisions, and seed.

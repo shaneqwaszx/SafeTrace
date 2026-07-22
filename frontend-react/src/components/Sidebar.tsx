@@ -1,4 +1,4 @@
-import { ClipboardList, Cpu, Gauge, HelpCircle, Layers3, ShieldCheck, SlidersHorizontal, Sparkles } from 'lucide-react';
+import { Cpu, Gauge, HelpCircle, Layers3, ShieldCheck, SlidersHorizontal, Sparkles } from 'lucide-react';
 import type {
   AnalysisSettings,
   BackendConnectionState,
@@ -10,7 +10,6 @@ import type {
   VlmExplanationProfileId,
   VlmProfileStatus,
 } from '../types/analysis';
-import { USE_CASE_PROFILES, resolveUseCaseProfile, supportLevelLabel } from '../data/useCaseProfiles';
 import { StatusBadge } from './StatusBadge';
 
 type SidebarProps = {
@@ -266,10 +265,6 @@ export function Sidebar({
   previewMode = false,
 }: SidebarProps) {
   const processingCost = settings.fps >= 3 ? 'High coverage' : settings.fps >= 1.5 ? 'Balanced coverage' : 'Fast preview';
-  const activeUseCaseProfile = resolveUseCaseProfile(
-    settings.useCaseProfile?.profileId,
-    settings.useCaseProfile?.customText ?? '',
-  );
   const preflightChecks = systemStatus?.preflight?.checks;
   const runtime = systemStatus?.runtime;
   const safeModeActive = Boolean(
@@ -279,6 +274,11 @@ export function Sidebar({
   );
   const vlmCheck = preflightChecks?.vlm;
   const visualExplanationCheck = preflightChecks?.visualExplanations ?? runtime?.visual_explanations;
+  const visualExplanationDetails = visualExplanationCheck?.details ?? {};
+  const executableVisualProvider = Boolean(
+    visualExplanationDetails.explanationSource === 'vlm'
+    || visualExplanationCheck?.status === 'available',
+  );
   const mobileSamCheck = preflightChecks?.mobileSam;
   const mobileSamDetails = systemStatus?.models.mobileSam?.details;
   const safeModeMobileSamAllowed = Boolean(
@@ -369,8 +369,16 @@ export function Sidebar({
       tone: getModelTone(systemStatus?.models.mobileSam),
     },
     {
-      label: showVisualExplanations ? 'Visual explanations: enabled' : 'Visual explanations: hidden',
-      tone: showVisualExplanations ? 'success' as const : 'neutral' as const,
+      label: !showVisualExplanations
+        ? 'Visual explanations: hidden'
+        : executableVisualProvider
+          ? 'Visual explanations: provider ready'
+          : 'Visual explanations: rule-based fallback',
+      tone: !showVisualExplanations
+        ? 'neutral' as const
+        : executableVisualProvider
+          ? 'success' as const
+          : 'info' as const,
     },
     {
       label: `Engine mode: ${VLM_PROFILE_LABELS[selectedProfile]}`,
@@ -480,54 +488,6 @@ export function Sidebar({
             <span className="mt-2 block text-xs font-medium text-slate-200">
               Showing up to {settings.topK} evidence frame{settings.topK === 1 ? '' : 's'}
             </span>
-          </label>
-
-          <label className="block">
-            <span className="inline-flex items-center gap-2 text-sm font-semibold text-white">
-              <ClipboardList className="h-4 w-4 text-slate-300" aria-hidden="true" />
-              Use-case profile
-            </span>
-            <span className="mt-1 block text-xs leading-5 text-slate-300">
-              Carries structured review context with the analysis request and result.
-            </span>
-            <select
-              className="focus-ring mt-3 w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-sm text-white"
-              value={activeUseCaseProfile.profileId}
-              onChange={(event) => {
-                const customText = event.target.value === 'custom_policy'
-                  ? activeUseCaseProfile.customText ?? ''
-                  : '';
-                updateSettings({ useCaseProfile: resolveUseCaseProfile(event.target.value, customText) });
-              }}
-            >
-              {USE_CASE_PROFILES.map((profile) => (
-                <option key={profile.profileId} value={profile.profileId}>
-                  {profile.label}
-                </option>
-              ))}
-            </select>
-            <div className="mt-2 rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-xs leading-5 text-slate-200">
-              <div className="flex flex-wrap items-center gap-2">
-                <span>{activeUseCaseProfile.description}</span>
-                <span className="rounded-full border border-white/15 bg-white/10 px-2 py-0.5 font-semibold uppercase text-slate-200">
-                  {supportLevelLabel(activeUseCaseProfile.backendSupportLevel)}
-                </span>
-              </div>
-              <p className="mt-1">Default query: <span className="font-semibold text-white">{activeUseCaseProfile.defaultQuery}</span></p>
-              {activeUseCaseProfile.limitations ? (
-                <p className="mt-1 text-amber-200">{activeUseCaseProfile.limitations}</p>
-              ) : null}
-            </div>
-            {activeUseCaseProfile.profileId === 'custom_policy' ? (
-              <textarea
-                className="focus-ring mt-2 min-h-20 w-full resize-y rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-sm text-white placeholder:text-slate-500"
-                value={activeUseCaseProfile.customText ?? ''}
-                onChange={(event) => updateSettings({
-                  useCaseProfile: resolveUseCaseProfile('custom_policy', event.target.value),
-                })}
-                placeholder="Add division-specific policy notes for this analysis"
-              />
-            ) : null}
           </label>
 
           <div className="rounded-lg border border-white/10 bg-slate-950/30 p-3">

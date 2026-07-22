@@ -1,0 +1,15 @@
+# Fast Local cloud runtime only. VLM, chatbot, PyInstaller, CUDA, and MobileSAM runtime packages are intentionally excluded.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.6.0+cpu
+torchvision==0.21.0+cpu
+fastapi==0.115.6
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+httpx==0.27.2
+numpy==1.26.4
+pillow==10.3.0
+opencv-python-headless==4.10.0.84
+ultralytics==8.2.50
+faiss-cpu==1.8.0.post1
+PyYAML==6.0.1
+psutil>=5.9,<7

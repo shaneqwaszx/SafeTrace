@@ -150,6 +150,36 @@ export function VideoQueue({
                         Error: {media.errorMessage}
                       </p>
                     ) : null}
+                    {(media.jobRuntimeLabel || media.requestedModeLabel || media.actualReviewLabel || media.actualDeviceLabel) ? (
+                      <div className="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] leading-4 text-slate-500">
+                        {media.jobRuntimeLabel ? (
+                          <span><span className="font-semibold text-slate-700">Runtime:</span> {media.jobRuntimeLabel}</span>
+                        ) : null}
+                        {media.requestedModeLabel ? (
+                          <span><span className="font-semibold text-slate-700">Requested:</span> {media.requestedModeLabel}</span>
+                        ) : null}
+                        {media.actualReviewLabel ? (
+                          <span className="col-span-2"><span className="font-semibold text-slate-700">Actual review:</span> {media.actualReviewLabel}</span>
+                        ) : null}
+                        {media.actualDeviceLabel ? (
+                          <span><span className="font-semibold text-slate-700">Device:</span> {media.actualDeviceLabel}</span>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {(media.vlmStatusLabel || media.mobileSamStatusLabel) ? (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {media.vlmStatusLabel ? (
+                          <span className="rounded-full border border-indigo-100 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700">
+                            VLM: {media.vlmStatusLabel}
+                          </span>
+                        ) : null}
+                        {media.mobileSamStatusLabel ? (
+                          <span className="rounded-full border border-cyan-100 bg-cyan-50 px-2 py-0.5 text-[10px] font-semibold text-cyan-700">
+                            MobileSAM: {media.mobileSamStatusLabel}
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </button>

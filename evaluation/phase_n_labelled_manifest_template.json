@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "samples": [
+    {
+      "id": "replace-with-labelled-sample",
+      "mediaPath": "path/to/labelled/video.mp4",
+      "sourceRelativePath": "Vehicle A/Shift 1/video.mp4",
+      "sourceGroupPath": "Vehicle A/Shift 1",
+      "profile": "seatbelt_compliance",
+      "query": "driver or occupant without seatbelt",
+      "positive": true,
+      "expectedFindings": ["seatbelt_missing"],
+      "timestampRanges": [{"startSeconds": 35.0, "endSeconds": 43.0, "finding": "seatbelt_missing"}],
+      "boundingBoxes": [],
+      "masks": [],
+      "notes": "Replace with human-labelled footage. Do not use generated detector output as ground truth."
+    }
+  ]
+}

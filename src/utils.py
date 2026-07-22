@@ -124,6 +124,7 @@ def extract_frames_with_metadata(
     prefix = prefix or video_path.stem
 
     saved: List[Path] = []
+    sampled_frame_records: List[dict] = []
     sampled = 0
     if uniform_over_video and source_frame_count > 0:
         candidate_indices = list(range(0, source_frame_count, step))
@@ -137,10 +138,18 @@ def extract_frames_with_metadata(
             ok, frame = cap.read()
             if not ok:
                 continue
-            timestamp_seconds = int(round(float(frame_index) / max(src_fps, 1e-6)))
-            out_path = out_dir / f"{prefix}_{timestamp_seconds:06d}.jpg"
+            timestamp_seconds = float(frame_index) / max(src_fps, 1e-6)
+            filename_seconds = int(round(timestamp_seconds))
+            out_path = out_dir / f"{prefix}_{filename_seconds:06d}.jpg"
             cv2.imwrite(str(out_path), frame)
             saved.append(out_path)
+            sampled_frame_records.append(
+                {
+                    "framePath": str(out_path),
+                    "sourceFrameIndex": int(frame_index),
+                    "timestampSeconds": timestamp_seconds,
+                }
+            )
             sampled += 1
             if sampled >= max_frames:
                 break
@@ -154,6 +163,13 @@ def extract_frames_with_metadata(
                 out_path = out_dir / f"{prefix}_{sampled:06d}.jpg"
                 cv2.imwrite(str(out_path), frame)
                 saved.append(out_path)
+                sampled_frame_records.append(
+                    {
+                        "framePath": str(out_path),
+                        "sourceFrameIndex": int(idx),
+                        "timestampSeconds": float(idx) / max(src_fps, 1e-6),
+                    }
+                )
                 sampled += 1
                 if sampled >= max_frames:
                     break
@@ -179,6 +195,7 @@ def extract_frames_with_metadata(
             "sourceVideoFps": src_fps,
             "frameStep": step,
             "uniformOverVideo": bool(uniform_over_video),
+            "sampledFrames": sampled_frame_records,
         }
     )
     return saved, metadata

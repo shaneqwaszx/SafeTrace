@@ -1,0 +1,4 @@
+id,mediaPath,sourceRelativePath,vehicleGroup,mediaType,durationSeconds,profile,expectedFinding,labelStatus,startSeconds,endSeconds,frameIndex,boxesReference,masksReference,humanLabelConfidence,annotatorId,annotationStatus,reviewerId,reviewerStatus,notes
+sample-seatbelt-missing,path/to/video.mp4,Vehicle-A/Shift-1/video.mp4,Vehicle-A,video,60,seatbelt_compliance,seatbelt_missing,positive,12.5,18.0,,,,0.9,annotator-1,pending,reviewer-1,pending,Replace with reviewed footage
+sample-no-violation,path/to/negative.mp4,Vehicle-B/Shift-2/negative.mp4,Vehicle-B,video,30,general_safety,no_violation,negative,0,30,,,,0.9,annotator-1,pending,reviewer-1,pending,Negative clips still require full review
+sample-unclear,path/to/unclear.mp4,Vehicle-C/Shift-1/unclear.mp4,Vehicle-C,video,20,seatbelt_compliance,insufficient_visibility,uncertain,4,9,,,,0.6,annotator-1,pending,reviewer-1,pending,Occluded torso

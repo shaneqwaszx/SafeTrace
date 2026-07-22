@@ -39,6 +39,26 @@ def _preview(text: str | None, *, limit: int = 240) -> str | None:
     return compact[:limit]
 
 
+def _runtime_details(reasoner: Any) -> Dict[str, Any]:
+    """Expose worker runtime facts without exposing model objects themselves."""
+    processor = getattr(reasoner, "_processor", None)
+    model = getattr(reasoner, "_model", None)
+    cuda_available = False
+    try:
+        import torch
+
+        cuda_available = bool(torch.cuda.is_available())
+    except Exception:
+        pass
+    return {
+        "processorClass": type(processor).__name__ if processor is not None else None,
+        "modelClass": type(model).__name__ if model is not None else None,
+        "actualDevice": str(getattr(reasoner, "device", "") or "") or None,
+        "cudaAvailable": cuda_available,
+        "modelLoaded": bool(getattr(reasoner, "_loaded", False)),
+    }
+
+
 def _configure_worker_env(
     app_root: Path | None,
     model_dir: Path | None,
@@ -101,6 +121,7 @@ def run_worker(input_json: Path, output_json: Path, *, app_root: Path | None = N
 
     try:
         request = json.loads(input_json.read_text(encoding="utf-8-sig"))
+        task = str(request.get("task") or "").strip().lower()
         model_dir = Path(str(request.get("modelDir") or ""))
         if not model_dir.is_absolute() and app_root is not None:
             model_dir = (app_root / model_dir).resolve()
@@ -114,7 +135,7 @@ def run_worker(input_json: Path, output_json: Path, *, app_root: Path | None = N
             request.get("maxTokens"),
             default=40,
             minimum=24,
-            maximum=64,
+            maximum=96 if task == "scene_applicability" else 64,
         )
         model_profile = str(request.get("profile") or "lightweight_512m").strip().lower()
         if model_profile not in {"lightweight_256m", "lightweight_512m", "enhanced_3b", "enhanced_2b"}:
@@ -157,7 +178,59 @@ def run_worker(input_json: Path, output_json: Path, *, app_root: Path | None = N
         model_load_started_at = time.perf_counter()
         reasoner = VlmReasoner(model_dir=model_dir, device=device, enabled=True)
         model_load_seconds = time.perf_counter() - model_load_started_at
+        runtime_details = _runtime_details(reasoner)
         image = imread_rgb(image_path)
+
+        if task == "scene_applicability":
+            from .scene_applicability import parse_mid_vlm_scene_response
+
+            prompt_text = str(request.get("prompt") or "").strip()
+            if not prompt_text:
+                raise ValueError("scene_applicability_prompt_missing")
+            generation_started_at = time.perf_counter()
+            raw_text = reasoner.generate_structured(
+                image,
+                prompt_text,
+                max_new_tokens=max_tokens,
+                timeout_seconds=generation_timeout_seconds,
+            )
+            generation_seconds = time.perf_counter() - generation_started_at
+            try:
+                scene_verification = parse_mid_vlm_scene_response(raw_text)
+            except (ValueError, json.JSONDecodeError) as exc:
+                _write_json(
+                    output_json,
+                    {
+                        "ok": False,
+                        "task": "scene_applicability",
+                        "errorType": type(exc).__name__,
+                        "errorMessage": str(exc),
+                        "fallbackReason": f"strict_json_rejected:{type(exc).__name__}",
+                        "rawTextPreview": _preview(raw_text),
+                        "modelProfile": model_profile,
+                        "generationTimeoutSeconds": generation_timeout_seconds,
+                        "maxTokens": max_tokens,
+                        **runtime_details,
+                        **timing_payload(),
+                    },
+                )
+                return 3
+            _write_json(
+                output_json,
+                {
+                    "ok": True,
+                    "task": "scene_applicability",
+                    "sceneVerification": scene_verification,
+                    "rawTextPreview": _preview(raw_text),
+                    "modelProfile": model_profile,
+                    "generationTimeoutSeconds": generation_timeout_seconds,
+                    "maxTokens": max_tokens,
+                    **runtime_details,
+                    **timing_payload(),
+                },
+            )
+            return 0
+
         generation_started_at = time.perf_counter()
         explanation = reasoner.explain_violation(
             image,
@@ -194,6 +267,7 @@ def run_worker(input_json: Path, output_json: Path, *, app_root: Path | None = N
                     "generationTimeoutSeconds": generation_timeout_seconds,
                     "maxTokens": max_tokens,
                     "imageRegion": image_region,
+                    **runtime_details,
                     **timing_payload(),
                 },
             )
@@ -213,6 +287,7 @@ def run_worker(input_json: Path, output_json: Path, *, app_root: Path | None = N
                 "cleanTextPreview": _preview(getattr(reasoner, "last_clean_vlm_text", None)),
                 "analysisContext": analysis_context,
                 "imageRegion": image_region,
+                **runtime_details,
                 **timing_payload(),
             },
         )
@@ -228,6 +303,10 @@ def run_worker(input_json: Path, output_json: Path, *, app_root: Path | None = N
                 "traceback": traceback.format_exc(limit=6),
                 "explanationSource": "rule_based",
                 "modelProfile": locals().get("model_profile", "lightweight_512m"),
+                "processorClass": None,
+                "modelClass": None,
+                "actualDevice": locals().get("device"),
+                "modelLoaded": False,
                 **timing_payload(),
             },
         )

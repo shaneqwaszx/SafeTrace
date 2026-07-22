@@ -44,3 +44,9 @@ Thumbs.db
 .ai-pipeline/
 codex_prompts/
 AGENTS.md
+.tmp_phase_*/
+tmp_pytest_*/
+_pytest*/
+tmp_safetrace*/
+tmp_pytest_phase*/
+.ai-pipeline/006_work/

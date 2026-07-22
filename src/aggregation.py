@@ -11,15 +11,18 @@ from typing import Any, Dict, Iterable, List
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 
 
-def timestamp_to_seconds(value: str | None) -> int:
+def timestamp_to_seconds(value: str | None) -> float:
     if not value:
-        return 0
-    parts = [int(part) for part in str(value).split(":") if part.isdigit()]
+        return 0.0
+    try:
+        parts = [float(part) for part in str(value).split(":")]
+    except (TypeError, ValueError):
+        return 0.0
     if len(parts) == 3:
         return parts[0] * 3600 + parts[1] * 60 + parts[2]
     if len(parts) == 2:
         return parts[0] * 60 + parts[1]
-    return parts[0] if parts else 0
+    return parts[0] if parts else 0.0
 
 
 def aggregate_violation_events(
@@ -31,7 +34,7 @@ def aggregate_violation_events(
     active_by_type: dict[str, dict[str, Any]] = {}
 
     for frame in sorted(frames, key=lambda item: timestamp_to_seconds(item.get("timestamp"))):
-        frame_second = timestamp_to_seconds(frame.get("timestamp"))
+        frame_second = float(frame.get("timestampSeconds") or timestamp_to_seconds(frame.get("timestamp")))
         for violation in frame.get("violations") or []:
             violation_id = str(violation.get("id") or "unknown_violation")
             confidence = float(violation.get("confidence") or 0.0)
@@ -40,15 +43,23 @@ def aggregate_violation_events(
                 "frameId": frame.get("id"),
                 "frameNumber": frame.get("frameNumber"),
                 "timestamp": frame.get("timestamp"),
+                "timestampSeconds": frame.get("timestampSeconds"),
+                "sourceFrameIndex": frame.get("sourceFrameIndex"),
                 "confidence": confidence,
                 "imageUrl": frame.get("imageUrl"),
                 "evidenceStrength": violation.get("evidenceStrength"),
                 "confidenceReason": violation.get("confidenceReason"),
                 "verifierAgreement": violation.get("verifierAgreement"),
+                "originProfileId": violation.get("originProfileId"),
+                "originProfileLabel": violation.get("originProfileLabel"),
+                "originRule": violation.get("originRule"),
+                "profileApplicability": violation.get("profileApplicability"),
+                "reviewLevel": violation.get("reviewLevel") or violation.get("evidenceStrength"),
+                "deduplicationKey": violation.get("deduplicationKey"),
             }
 
             existing = active_by_type.get(violation_id)
-            if existing is None or frame_second - int(existing["lastSecond"]) > merge_gap_seconds:
+            if existing is None or frame_second - float(existing["lastSecond"]) > merge_gap_seconds:
                 event = {
                     "id": f"{violation_id}_event_{len(events) + 1}",
                     "type": violation_id,
@@ -64,6 +75,12 @@ def aggregate_violation_events(
                     "confidences": [confidence],
                     "evidenceStrengths": [violation.get("evidenceStrength")],
                     "verifierAgreements": [violation.get("verifierAgreement")],
+                    "originProfileId": violation.get("originProfileId"),
+                    "originProfileLabel": violation.get("originProfileLabel"),
+                    "originRule": violation.get("originRule"),
+                    "profileApplicability": violation.get("profileApplicability"),
+                    "reviewLevel": violation.get("reviewLevel") or violation.get("evidenceStrength"),
+                    "deduplicationKey": violation.get("deduplicationKey"),
                 }
                 events.append(event)
                 active_by_type[violation_id] = event
@@ -100,6 +117,12 @@ def aggregate_violation_events(
                 "confidenceMax": max(confidences) if confidences else 0.0,
                 "evidenceStrengths": sorted(set(evidence_strengths)),
                 "verifierAgreements": sorted(set(verifier_agreements)),
+                "originProfileId": event.get("originProfileId"),
+                "originProfileLabel": event.get("originProfileLabel"),
+                "originRule": event.get("originRule"),
+                "profileApplicability": event.get("profileApplicability"),
+                "reviewLevel": event.get("reviewLevel"),
+                "deduplicationKey": event.get("deduplicationKey"),
                 "supportingFrameCount": len(supporting_frames),
                 "supportingFrames": supporting_frames,
             }

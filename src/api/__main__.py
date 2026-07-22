@@ -16,6 +16,8 @@ DEFAULT_LOG_LEVEL = "info"
 def default_app_root() -> Path:
     if getattr(sys, "frozen", False):
         executable = Path(sys.executable).resolve()
+        if executable.parent.name.lower() == "safetrace-backend" and executable.parent.parent.name.lower() == "backend":
+            return executable.parent.parent.parent
         if executable.parent.name.lower() == "backend":
             return executable.parent.parent
         return executable.parent
@@ -119,6 +121,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     app_root = args.app_root.resolve()
+    os.environ["SAFETRACE_APP_ROOT"] = str(app_root)
+    os.environ["SAFETRACE_PROJECT_ROOT"] = str(app_root)
     env_file = args.env_file or app_root / "config" / "safetrace.env"
     load_env_file(env_file)
     apply_packaged_defaults(app_root)

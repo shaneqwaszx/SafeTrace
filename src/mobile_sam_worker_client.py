@@ -35,7 +35,8 @@ class MobileSamWorkerSegmenter:
 
     def __init__(self, checkpoint: str | Path | None = None, device: str | None = None) -> None:
         self.checkpoint = Path(checkpoint or SETTINGS.mobile_sam_checkpoint)
-        self.device = "cpu" if (device or SETTINGS.device or "cpu").lower() == "cpu" else "cpu"
+        requested_device = str(device or SETTINGS.mobile_sam_device or SETTINGS.device or "auto").strip().lower()
+        self.device = "cuda" if requested_device == "cuda" else "cpu"
         self.timeout_seconds = max(
             1.0,
             float(getattr(SETTINGS, "mobile_sam_worker_timeout_seconds", 60.0) or 60.0),
@@ -69,6 +70,7 @@ class MobileSamWorkerSegmenter:
     ) -> Dict[str, Any]:
         return {
             "mobileSamWorkerEnabled": bool(self.enabled),
+            "actualMobileSamDevice": self.device,
             "mobileSamWorkerTimeoutSeconds": self.timeout_seconds,
             "mobileSamWorkerAttempted": bool(attempted),
             "mobileSamWorkerSucceeded": bool(succeeded),
@@ -138,7 +140,7 @@ class MobileSamWorkerSegmenter:
         return {
             "imagePath": str(image_path),
             "checkpoint": str(self.checkpoint),
-            "device": "cpu",
+            "device": self.device,
             "detections": [
                 {
                     "index": index,
@@ -212,7 +214,8 @@ class MobileSamWorkerSegmenter:
             env = os.environ.copy()
             env.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
             env.setdefault("OMP_NUM_THREADS", "1")
-            env.setdefault("SAFETRACE_DEVICE", "cpu")
+            env["SAFETRACE_DEVICE"] = self.device
+            env["SAFETRACE_MOBILESAM_DEVICE"] = self.device
             result = subprocess.run(
                 self._command(request_path, output_path),
                 cwd=str(Path(os.environ.get("SAFETRACE_APP_ROOT") or SETTINGS.project_root).resolve()),
