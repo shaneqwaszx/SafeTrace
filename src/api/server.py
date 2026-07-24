@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import json
+import logging
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -33,6 +34,7 @@ from src.device_gateway import device_gateway_payload
 from src.vlm_reasoner import path_has_vlm_model_files, vlm_status_payload
 
 from .batches import BatchStore, BatchValidationError
+from .browser_bridge import BrowserBridgeSessionManager, CONNECTOR_PROTOCOL_VERSION
 from .jobs import (
     AnalysisSettings,
     JobRestartConflictError,
@@ -78,13 +80,16 @@ from .schemas import (
     VlmSettingsResponse,
 )
 
+LOGGER = logging.getLogger("safetrace.api")
 
 LOCAL_FRONTEND_ORIGINS = (
     "http://127.0.0.1:5173",
     "http://localhost:5173",
 )
+VERCEL_FRONTEND_ORIGIN = "https://safetrace-iota.vercel.app"
 PNA_REQUEST_HEADER = "access-control-request-private-network"
 PNA_RESPONSE_HEADER = "Access-Control-Allow-Private-Network"
+BRIDGE_SESSION_HEADER = "X-SafeTrace-Session"
 VLM_PROFILE_RULE_BASED = "rule_based"
 VLM_PROFILE_LIGHTWEIGHT = "lightweight_256m"
 VLM_PROFILE_LIGHTWEIGHT_512M = "lightweight_512m"
@@ -163,9 +168,18 @@ def _cors_allowed_origins() -> list[str]:
     origins = [
         *local_origins,
         *getattr(SETTINGS, "allowed_origins", ()),
+        *_split_origins(os.environ.get("SAFETRACE_ALLOWED_FRONTEND_ORIGINS", "")),
         *_split_origins(os.environ.get("SAFETRACE_ALLOWED_ORIGINS", "")),
     ]
-    return list(dict.fromkeys(_normalize_origin(origin) for origin in origins if _normalize_origin(origin)))
+    normalized: list[str] = []
+    for origin in origins:
+        candidate = _normalize_origin(origin)
+        if not candidate or candidate.lower() == "null" or candidate == "*":
+            if candidate:
+                LOGGER.warning("Ignored non-exact browser origin allowlist entry origin=%s", candidate)
+            continue
+        normalized.append(candidate)
+    return list(dict.fromkeys(normalized))
 
 
 def _is_cors_origin_allowed(origin: str | None) -> bool:
@@ -187,7 +201,7 @@ def _configure_cors(app: FastAPI) -> None:
         allow_origins=_cors_allowed_origins(),
         allow_credentials=False,
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-        allow_headers=["*"],
+        allow_headers=["Accept", "Content-Type", BRIDGE_SESSION_HEADER],
         max_age=600,
     )
 
@@ -197,6 +211,55 @@ def _configure_cors(app: FastAPI) -> None:
         if _is_private_network_preflight(request):
             response.headers[PNA_RESPONSE_HEADER] = "true"
         return response
+
+
+def _bridge_session_required(request: Request) -> bool:
+    path = request.url.path.rstrip("/")
+    if path in {"/api/health", "/api/bridge/bootstrap"}:
+        return False
+    # Media is rendered by the browser as an image. It remains protected by
+    # unguessable job ownership IDs and the exact-origin CORS boundary.
+    if path.startswith("/api/media/"):
+        return False
+    return True
+
+
+def _configure_browser_bridge_security(app: FastAPI) -> None:
+    @app.middleware("http")
+    async def browser_bridge_security(request: Request, call_next):
+        if not request.url.path.startswith("/api/"):
+            return await call_next(request)
+        origin = _normalize_origin(request.headers.get("origin"))
+        if not origin:
+            # Preserve local CLI, TestClient, and packaged-runtime automation.
+            return await call_next(request)
+        if not _is_cors_origin_allowed(origin):
+            LOGGER.warning("Rejected browser API origin path=%s origin=%s", request.url.path, origin or "<missing>")
+            return JSONResponse(
+                status_code=403,
+                content={"detail": {"message": "Browser origin is not authorized.", "code": "origin_not_allowed"}},
+            )
+        if request.method == "OPTIONS" or not _bridge_session_required(request):
+            return await call_next(request)
+        manager: BrowserBridgeSessionManager = request.app.state.browser_bridge_sessions
+        validation = manager.validate(request.headers.get(BRIDGE_SESSION_HEADER), origin)
+        if not validation.valid:
+            LOGGER.warning(
+                "Rejected browser connector session path=%s origin=%s reason=%s",
+                request.url.path,
+                origin,
+                validation.reason,
+            )
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": {
+                        "message": "Reconnect this browser to the SafeTrace Local Runtime.",
+                        "code": validation.reason,
+                    }
+                },
+            )
+        return await call_next(request)
 
 
 def _display_path(path: Path) -> str:
@@ -1370,6 +1433,9 @@ def create_app(job_store: JobStore | None = None, batch_store: BatchStore | None
     app.state.job_store = job_store or JobStore()
     app.state.batch_store = batch_store or BatchStore()
     app.state.recovery_decision_lock = threading.Lock()
+    app.state.browser_bridge_sessions = BrowserBridgeSessionManager(
+        ttl_seconds=getattr(SETTINGS, "connector_session_ttl_seconds", 3600)
+    )
 
     def resume_recoverable_batch_jobs(application: FastAPI) -> None:
         store: JobStore = application.state.job_store
@@ -1408,6 +1474,7 @@ def create_app(job_store: JobStore | None = None, batch_store: BatchStore | None
     initial_vlm_profile = _normalized_vlm_profile(getattr(SETTINGS, "vlm_profile", VLM_PROFILE_RULE_BASED))
     app.state.vlm_selected_profile = initial_vlm_profile
     app.state.vlm_enabled = _initial_vlm_enabled(initial_vlm_profile)
+    _configure_browser_bridge_security(app)
     _configure_cors(app)
 
     @app.exception_handler(Exception)
@@ -1424,7 +1491,29 @@ def create_app(job_store: JobStore | None = None, batch_store: BatchStore | None
             api="safetrace-local",
             version="dev",
             offline=SETTINGS.offline,
+            connectorProtocolVersion=CONNECTOR_PROTOCOL_VERSION,
+            bridgeSupported=True,
+            runtimeProfile=getattr(SETTINGS, "runtime_profile", "portable_fast_local"),
         )
+
+    @app.post("/api/bridge/bootstrap")
+    def bridge_bootstrap(request: Request) -> dict[str, Any]:
+        origin = _normalize_origin(request.headers.get("origin"))
+        if not _is_cors_origin_allowed(origin):
+            raise HTTPException(status_code=403, detail={"message": "Browser origin is not authorized.", "code": "origin_not_allowed"})
+        manager: BrowserBridgeSessionManager = request.app.state.browser_bridge_sessions
+        token, claims = manager.issue(origin)
+        LOGGER.info("Issued browser connector session origin=%s ttl_seconds=%s", origin, manager.ttl_seconds)
+        return {
+            "api": "safetrace-local",
+            "bridgeSupported": True,
+            "connectorProtocolVersion": CONNECTOR_PROTOCOL_VERSION,
+            "runtimeProfile": getattr(SETTINGS, "runtime_profile", "portable_fast_local"),
+            "sessionId": manager.session_id,
+            "sessionToken": token,
+            "expiresAt": datetime.fromtimestamp(claims["exp"], timezone.utc).isoformat(),
+            "expiresInSeconds": manager.ttl_seconds,
+        }
 
     @app.get("/api/system/status", response_model=SystemStatusResponse)
     def system_status(request: Request, store: JobStore = Depends(get_job_store)) -> SystemStatusResponse:

@@ -6,7 +6,17 @@ export type MediaStatus = 'draft' | 'ready' | 'queued' | 'processing' | 'complet
 
 export type DeviceMode = 'Auto' | 'CPU' | 'GPU';
 
-export type BackendConnectionState = 'live' | 'connecting' | 'connected' | 'disconnected' | 'incompatible' | 'error';
+export type BackendConnectionState =
+  | 'live'
+  | 'connecting'
+  | 'connected'
+  | 'disconnected'
+  | 'permission_required'
+  | 'permission_denied'
+  | 'unsupported_browser'
+  | 'session_expired'
+  | 'incompatible'
+  | 'error';
 
 export type RecoveryJob = {
   jobId: string;
@@ -247,6 +257,9 @@ export type BackendHealth = {
   api: 'safetrace-local';
   version: string;
   offline: boolean;
+  connectorProtocolVersion: number;
+  bridgeSupported: boolean;
+  runtimeProfile: string;
 };
 
 export type BackendModelStatus = {

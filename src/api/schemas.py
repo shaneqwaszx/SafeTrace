@@ -28,6 +28,9 @@ class HealthResponse(BaseModel):
     api: Literal["safetrace-local"]
     version: str
     offline: bool
+    connectorProtocolVersion: int = 1
+    bridgeSupported: bool = True
+    runtimeProfile: str
 
 
 class ModelStatus(BaseModel):

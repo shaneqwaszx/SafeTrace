@@ -1,162 +1,83 @@
-# SafeTrace Live Frontend on Vercel
+# SafeTrace Vercel Frontend With Local Backend
 
-SafeTrace uses a hybrid deployment model:
+The production frontend at `https://safetrace-iota.vercel.app/` is a static
+browser application. Analysis requests go directly from that browser tab to
+the same computer's SafeTrace backend at `http://127.0.0.1:8000/api`.
+Vercel does not proxy, receive, or store analysis uploads.
 
-```text
-static Vercel React frontend + local Windows SafeTrace backend runtime
-```
+## Required Vercel variables
 
-The Vercel site is only the user interface. Videos, ZIP uploads, analysis jobs,
-reports, evidence media, VLM explanations, and SafeTrace Assistant requests are
-processed by the local backend at `http://127.0.0.1:8000`. The frontend must not
-upload videos or results to Vercel.
-
-## Vercel Suitability
-
-Vercel is appropriate for demo and non-commercial Hobby usage. Business,
-commercial, team, or production usage may require Vercel Pro or a different
-hosting plan. Review Vercel's current plan terms before public release.
-
-## Build Settings
-
-Deploy from `frontend-react` with:
+Set these on the existing `safetrace` project for Production (and Preview only
+when preview deployments should use the same local connector):
 
 ```text
-Framework: Vite
-Build command: npm run build
-Output directory: dist
-Install command: npm install
-```
-
-The frontend should stay backend-required:
-
-```text
+VITE_SAFETRACE_API_MODE=local_loopback
+VITE_SAFETRACE_LOCAL_API_BASE=http://127.0.0.1:8000/api
 VITE_SAFETRACE_REQUIRE_BACKEND=true
 VITE_SAFETRACE_ENABLE_PREVIEW_MODE=false
-VITE_SAFETRACE_API_BASE_URL=http://127.0.0.1:8000
 ```
 
-If `VITE_SAFETRACE_API_BASE_URL` is unset, the frontend discovers the local
-runtime at:
+Never put a connector token in Vercel or a Vite environment variable. The
+backend creates a new signing secret when it starts. The allowed browser
+origin obtains a short-lived, origin-bound token during the explicit Connect
+Local Backend handshake and stores it in browser `sessionStorage`.
+
+For local Vite development, use `VITE_SAFETRACE_API_MODE=relative_proxy`.
+Vite's `/api` proxy remains the development-only path.
+
+## Starting SafeTrace
+
+Run `START_SAFETRACE_VERCEL.bat` from the repository root. It:
+
+1. runs the strict `local_full` preflight;
+2. reuses a compatible healthy backend when one is already listening;
+3. otherwise starts Uvicorn on `127.0.0.1:8000` only;
+4. polls `/api/health`; and
+5. opens `https://safetrace-iota.vercel.app/?backend=local`.
+
+In the browser, choose **Connect Local Backend** and grant Local Network Access
+to the SafeTrace site when prompted. Denying the browser permission leaves
+analysis controls locked and does not switch to a remote service.
+
+## Backend security boundary
+
+The launcher sets this exact allowlist:
 
 ```text
-http://127.0.0.1:8000/api
-http://localhost:8000/api
+SAFETRACE_ALLOWED_FRONTEND_ORIGINS=https://safetrace-iota.vercel.app,http://127.0.0.1:5173,http://localhost:5173
 ```
 
-## Deployment Command
+The backend:
 
-Do not run deployment from Codex unless explicitly requested. When ready, run:
+- binds only to `127.0.0.1`;
+- emits `Access-Control-Allow-Private-Network: true` only for an allowlisted
+  origin's valid preflight;
+- does not use wildcard origins or wildcard request headers;
+- requires `X-SafeTrace-Session` for browser API access beyond health,
+  bootstrap, and job-owned media rendering;
+- rejects tokens from another origin, another backend start, or an expired
+  session; and
+- preserves no-`Origin` CLI and TestClient operation for local automation.
 
-```bat
-cd frontend-react
-npx vercel --prod
-cd ..
-```
+## Browser compatibility
 
-The helper script performs install, build, and deploy:
+Chromium's Local Network Access rollout varies by browser version and managed
+policy. SafeTrace sets `targetAddressSpace: "loopback"` on connector fetches
+where the browser supports it. If no permission prompt appears, check the
+site's Local Network Access permission, browser version, enterprise policy,
+and whether endpoint security software blocks loopback requests.
 
-```bat
-scripts\deploy_frontend_vercel.bat
-```
-
-On the first run, Vercel CLI may ask you to log in and link the project.
-
-## Backend Allowed Origins
-
-After deployment, copy the deployed URL, for example:
-
-```text
-https://safetrace-example.vercel.app
-```
-
-Add it to `config/safetrace.env` before building or starting the local backend:
-
-```text
-SAFETRACE_ALLOWED_ORIGINS=https://safetrace-example.vercel.app,http://127.0.0.1:5173,http://localhost:5173
-```
-
-Restart the backend after changing allowed origins. Rebuild the backend
-executable and release package before sharing a package that should work with a
-new Vercel URL.
-
-## Backend EXE and Package Flow
-
-After changing `SAFETRACE_ALLOWED_ORIGINS`, rebuild the local runtime:
-
-```bat
-python scripts\build_backend_exe.py --run
-python scripts\build_desktop_prototype.py --clean
-```
-
-The backend executable and release package are generated output. Do not commit:
-
-```text
-dist/
-frontend-react/dist/
-.vercel/
-*.exe
-*.gguf
-*.pt
-*.pth
-*.onnx
-*.bin
-*.safetensors
-data/
-uploads/
-generated/
-generated_media/
-models/vlm/
-models/chat/*.gguf
-checkpoints/mobile_sam.pt
-```
-
-## Live Frontend Test Flow
-
-1. Deploy the frontend to Vercel.
-2. Copy the deployed URL, such as `https://safetrace-example.vercel.app`.
-3. Add it to `config/safetrace.env`:
-
-   ```text
-   SAFETRACE_ALLOWED_ORIGINS=https://safetrace-example.vercel.app,http://127.0.0.1:5173,http://localhost:5173
-   ```
-
-4. Rebuild the backend EXE:
-
-   ```bat
-   python scripts\build_backend_exe.py --run
-   ```
-
-5. Build the local package:
-
-   ```bat
-   python scripts\build_desktop_prototype.py --clean
-   ```
-
-6. Start the packaged backend or launcher from `dist\SafeTrace`.
-7. Open the Vercel URL.
-8. Confirm the frontend is disconnected when the backend is off.
-9. Start the backend EXE.
-10. Click `Reconnect to Local Runtime`.
-11. Confirm these local endpoints work:
-
-    ```text
-    http://127.0.0.1:8000/api/health
-    http://127.0.0.1:8000/api/system/status
-    ```
-
-12. Run Safe Mode rule-based analysis first.
-13. Keep Lightweight VLM disabled for the main Safe Mode release package.
-14. Confirm the browser Network tab calls `http://127.0.0.1:8000/api/...` and
-    does not upload videos or results to Vercel.
+Safari and Firefox support may differ. A browser that cannot authorize HTTPS
+page access to an HTTP loopback service is not silently redirected elsewhere.
 
 ## Troubleshooting
 
-If the live frontend cannot connect:
-
-- Confirm the backend is running on `127.0.0.1:8000`.
-- Confirm `SAFETRACE_ALLOWED_ORIGINS` exactly matches the deployed Vercel origin.
-- Restart the backend after editing `config/safetrace.env`.
-- Check the browser console for CORS or private-network preflight errors.
-- Keep rule-based Safe Mode analysis working before experimenting with optional
-  VLM profiles outside the main release package.
+- **Backend not running:** keep the launcher/backend terminal open and retry.
+- **Permission denied:** allow Local Network Access for
+  `safetrace-iota.vercel.app`, then reconnect.
+- **Wrong service:** stop the process occupying port 8000 and run the launcher.
+- **Session ended:** reconnect; backend restarts intentionally invalidate old
+  browser sessions.
+- **CORS error:** verify the page origin exactly matches the backend allowlist.
+- **Hosted page calls `/api`:** verify the production Vercel variables above
+  and redeploy the frontend. Do not add a Vercel API rewrite.

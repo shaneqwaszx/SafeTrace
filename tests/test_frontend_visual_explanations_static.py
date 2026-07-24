@@ -389,13 +389,14 @@ def test_safety_insights_dashboard_is_standalone_view():
 def test_frontend_error_handling_reads_response_body_once():
     analysis_source = read_frontend("services/analysisService.ts")
     chat_source = read_frontend("services/chatService.ts")
+    api_client_source = read_frontend("services/apiClient.ts")
 
     assert "throw new Error(await readErrorMessage(response))" in analysis_source
-    assert "async function readChatErrorMessage(response: Response)" in chat_source
-    assert "throw new Error(await readChatErrorMessage(response))" in chat_source
-    assert "const raw = await response.text()" in chat_source
-    assert "JSON.parse(raw)" in chat_source
-    assert "const body = await response.json()" not in chat_source
+    assert "return apiFetch<T>(path" in chat_source
+    assert "readChatErrorMessage" not in chat_source
+    assert "async function responseError(response: Response)" in api_client_source
+    assert "const raw = await response.text()" in api_client_source
+    assert "const response = await fetch(" in api_client_source
 
 
 def test_evidence_cards_use_user_facing_explanation_sections_and_keeps_debug_in_details():

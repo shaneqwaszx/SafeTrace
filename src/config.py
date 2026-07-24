@@ -288,6 +288,9 @@ class Settings:
     include_local_cors_origins: bool = field(
         default_factory=lambda: _env_bool("SAFETRACE_INCLUDE_LOCAL_CORS_ORIGINS", True)
     )
+    connector_session_ttl_seconds: int = field(
+        default_factory=lambda: _env_int("SAFETRACE_CONNECTOR_SESSION_TTL_SECONDS", 3600)
+    )
 
     # ---- Sampling / pipeline ----
     frame_fps: float = field(default_factory=lambda: _env_float("SAFETRACE_FPS", 1.0))

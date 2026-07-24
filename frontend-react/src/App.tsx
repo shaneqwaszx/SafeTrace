@@ -32,6 +32,7 @@ import {
 import {
   SAFETRACE_API_BASE,
   SAFETRACE_API_BASE_CANDIDATES,
+  SAFETRACE_API_MODE,
   SAFETRACE_ENABLE_PREVIEW_MODE,
   SAFETRACE_REQUIRE_BACKEND,
   BackendDiscoveryError,
@@ -90,6 +91,7 @@ import type {
 import { formatFileSize } from './utils/formatters';
 import { copyJobIdToClipboard, formatShortJobId } from './utils/jobIds';
 import { SelectedMediaViewer } from './components/SelectedMediaViewer';
+import { SAFETRACE_SESSION_EXPIRED_EVENT } from './services/apiClient';
 
 const DEFAULT_QUERY = resolveUseCaseProfile().defaultQuery;
 const ANALYSIS_STEPS = [
@@ -339,7 +341,9 @@ function SafeTraceApp() {
   const [showAnnotation, setShowAnnotation] = useState(false);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [hoveredFrameId, setHoveredFrameId] = useState<string | null>(null);
-  const [backendState, setBackendState] = useState<BackendConnectionState>('live');
+  const [backendState, setBackendState] = useState<BackendConnectionState>(
+    SAFETRACE_API_MODE === 'local_loopback' ? 'disconnected' : 'live',
+  );
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [backendMessage, setBackendMessage] = useState<string | null>(null);
   const [activeApiBase, setActiveApiBase] = useState(SAFETRACE_API_BASE);
@@ -789,8 +793,19 @@ function SafeTraceApp() {
   }, [previewMode]);
 
   useEffect(() => {
-    void refreshBackendConnection();
+    if (SAFETRACE_API_MODE === 'relative_proxy') {
+      void refreshBackendConnection();
+    }
   }, [refreshBackendConnection]);
+
+  useEffect(() => {
+    const handleSessionExpired = () => {
+      setBackendState('session_expired');
+      setBackendMessage('This browser session ended or the local backend restarted. Connect again to continue.');
+    };
+    window.addEventListener(SAFETRACE_SESSION_EXPIRED_EVENT, handleSessionExpired);
+    return () => window.removeEventListener(SAFETRACE_SESSION_EXPIRED_EVENT, handleSessionExpired);
+  }, []);
 
   useEffect(() => {
     if (!backendConnected) return;
@@ -1631,6 +1646,7 @@ function SafeTraceApp() {
           onSettingsChange={handleSettingsChange}
           backendState={backendState}
           apiBase={activeApiBase}
+          apiMode={SAFETRACE_API_MODE}
           systemStatus={systemStatus}
           backendMessage={backendMessage}
           previewMode={previewMode}
@@ -1911,6 +1927,12 @@ function BackendUnavailableState({
   const isConnecting = state === 'connecting' || state === 'live';
   const title = state === 'incompatible'
     ? 'SafeTrace Local Runtime incompatible'
+    : state === 'permission_required' || state === 'permission_denied'
+      ? 'Local network permission needed'
+    : state === 'unsupported_browser'
+      ? 'Browser local access is unavailable'
+    : state === 'session_expired'
+      ? 'Local Backend session ended'
     : state === 'connecting'
       ? 'Connecting to SafeTrace Local Runtime'
       : 'SafeTrace Local Runtime not connected';
@@ -1926,11 +1948,13 @@ function BackendUnavailableState({
             <p className="text-xs font-bold uppercase tracking-wide text-amber-700">Live website loaded</p>
             <h2 className="mt-1 text-base font-bold">{title}</h2>
             <p className="mt-2 max-w-3xl text-sm leading-6">
-              To use analysis, run SafeTrace.exe on this computer, keep the local runtime window open, then return here
-              and click Reconnect.
+              Run <span className="font-mono">START_SAFETRACE_VERCEL.bat</span> on this computer and keep its
+              local backend window open. Then choose Connect Local Backend and allow this SafeTrace site to
+              access devices on your local network when the browser asks.
             </p>
             <p className="mt-2 max-w-3xl text-sm leading-6">
-              During development, run <span className="font-mono">scripts\start_safetrace_windows.bat</span> instead.
+              Analysis stays on this device. SafeTrace does not upload your footage to Vercel or silently switch
+              to a remote backend.
             </p>
             <dl className="mt-3 grid gap-1 text-xs">
               <div>
@@ -1957,8 +1981,24 @@ function BackendUnavailableState({
           className="focus-ring inline-flex items-center justify-center gap-2 rounded-lg bg-amber-700 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-amber-800 disabled:opacity-60"
         >
           <RefreshCcw className={`h-4 w-4 ${isConnecting ? 'animate-spin' : ''}`} aria-hidden="true" />
-          Reconnect to Local Runtime
+          {state === 'connected' ? 'Reconnect Local Backend' : 'Connect Local Backend'}
         </button>
+      </div>
+      <div className="mt-4 flex flex-wrap gap-3 text-sm">
+        <a
+          href="https://github.com/aether-raid/SafeTrace/blob/integrate-frontend-backend/docs/live_frontend_vercel_deployment.md"
+          target="_blank"
+          rel="noreferrer"
+          className="font-semibold text-amber-800 underline decoration-amber-400 underline-offset-2"
+        >
+          Open setup instructions
+        </a>
+        <a
+          href="http://127.0.0.1:5173"
+          className="font-semibold text-amber-800 underline decoration-amber-400 underline-offset-2"
+        >
+          Use local frontend instead
+        </a>
       </div>
     </section>
   );

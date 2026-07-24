@@ -17,6 +17,7 @@ type SidebarProps = {
   onSettingsChange: (settings: AnalysisSettings) => void;
   backendState: BackendConnectionState;
   apiBase: string;
+  apiMode: 'relative_proxy' | 'local_loopback';
   systemStatus: SystemStatus | null;
   backendMessage?: string | null;
   previewMode?: boolean;
@@ -260,6 +261,7 @@ export function Sidebar({
   onSettingsChange,
   backendState,
   apiBase,
+  apiMode,
   systemStatus,
   backendMessage,
   previewMode = false,
@@ -662,6 +664,22 @@ export function Sidebar({
               <dd className="break-all font-mono">{apiBase}</dd>
             </div>
             <div>
+              <dt className="font-semibold text-slate-200">Connection mode</dt>
+              <dd>{apiMode === 'local_loopback' ? 'Hosted frontend to local backend' : 'Local development proxy'}</dd>
+            </div>
+            <div>
+              <dt className="font-semibold text-slate-200">Session state</dt>
+              <dd>{backendState === 'connected' ? 'Connected for this browser tab' : 'Not connected'}</dd>
+            </div>
+            {runtime?.backend?.version || runtime?.backend?.runtimeProfile ? (
+              <div>
+                <dt className="font-semibold text-slate-200">Backend</dt>
+                <dd>
+                  {String(runtime.backend.version || 'unknown')} / {String(runtime.backend.runtimeProfile || 'unknown')}
+                </dd>
+              </div>
+            ) : null}
+            <div>
               <dt className="font-semibold text-slate-200">Selected device</dt>
               <dd>{getDeviceStatus(settings.deviceMode).label}</dd>
             </div>
@@ -677,26 +695,6 @@ export function Sidebar({
               <div>
                 <dt className="font-semibold text-slate-200">Connection message</dt>
                 <dd>{backendMessage}</dd>
-              </div>
-            ) : null}
-            {runtime?.python?.executable ? (
-              <div>
-                <dt className="font-semibold text-slate-200">Python</dt>
-                <dd className="break-all font-mono">
-                  {runtime.python.version} - {runtime.python.executable}
-                </dd>
-              </div>
-            ) : null}
-            {runtime?.workingDirectory ? (
-              <div>
-                <dt className="font-semibold text-slate-200">Working directory</dt>
-                <dd className="break-all font-mono">{runtime.workingDirectory}</dd>
-              </div>
-            ) : null}
-            {runtime?.jobStorePath ? (
-              <div>
-                <dt className="font-semibold text-slate-200">Job store</dt>
-                <dd className="break-all font-mono">{runtime.jobStorePath}</dd>
               </div>
             ) : null}
             {runtime?.chat ? (
